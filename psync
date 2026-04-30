@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+
+import argparse
+import glob
+import tomllib
+import hashlib
+import os
+import time
+
+import watchdog
+
+def get_hash(filename):
+    with open(filename, "rb") as f:
+        digest = hashlib.file_digest(f, hashlib.sha256)
+        h = digest.hexdigest()
+    return h
+
+def get_short_hash(filename):
+    with open(filename, "rb") as f:
+        digest = hashlib.file_digest(f, hashlib.shake_128)
+        h = digest.hexdigest(4)
+    return h
+
+class FileInformation(object):
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self._hash = None
+        self._short_hash = None
+        metadata = os.stat(file_path)
+        self.size = metadata.st_size
+        self.last_accessed = time.ctime(metadata.st_atime)
+        self.last_modified = time.ctime(metadata.st_mtime)
+    
+    def dump(self):
+        print(self.file_path)
+        print(self.hash)
+        print(self.short_hash)
+        print(self.size)
+        print(self.last_accessed)
+        print(self.last_modified)
+    
+    @property
+    def hash(self):
+        if self._hash == None:
+            self._hash = get_hash(self.file_path)
+        return self._hash
+    
+    @property
+    def short_hash(self):
+        if self._short_hash == None:
+            self._short_hash = get_short_hash(self.file_path)
+        return self._short_hash
+
+with open("settings.toml", "rb") as settings_fd:
+    settings_data = tomllib.load(settings_fd)
+    
+print("using path:", settings_data["core"]["base_path"])
+print(get_hash("settings.toml"))
+print(get_short_hash("settings.toml"))
+
+file_info = FileInformation("settings.toml")
+file_info.dump()
+
+files1_paths = glob.glob('/home/daspork/repos/test/folder1/**/*.*', recursive=True)
+files2_paths = glob.glob('/home/daspork/repos/test/folder2/**/*.*', recursive=True)
+
+files1 = {}
+files2 = {}
+
+for ff in files1_paths:
+    files1[ff] = FileInformation(ff)
+
+for ff in files2_paths:
+    files2[ff] = FileInformation(ff)
+
+
+for path, fi in files1.items():
+    print(path)
+    print(files2[path])
+    if path in files2:
+        print(path, "is good")
