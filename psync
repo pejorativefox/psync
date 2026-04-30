@@ -31,6 +31,12 @@ class FileInformation(object):
         self.last_accessed = time.ctime(metadata.st_atime)
         self.last_modified = time.ctime(metadata.st_mtime)
     
+    def __eq__(self, other):
+        if isinstance(other, self.__class__):
+            return self.hash == other.hash
+        else:
+            return False
+    
     def dump(self):
         print(self.file_path)
         print(self.hash)
@@ -68,17 +74,18 @@ files1 = {}
 files2 = {}
 
 for ff in files1_paths:
-    fp = os.path.relpath(ff, start="/home/daspork/repos/test/")
+    fp = os.path.relpath(ff, start="/home/daspork/repos/test/folder1/")
     files1[fp] = FileInformation(ff)
 
 for ff in files2_paths:
-    fp = os.path.relpath(ff, start="/home/daspork/repos/test/")
+    fp = os.path.relpath(ff, start="/home/daspork/repos/test/folder2/")
     files2[fp] = FileInformation(ff)
 
-print(files2)
-
 for path, fi in files1.items():
-    print(path)
-    print(files2[path])
     if path in files2:
-        print(path, "is good")
+        a = fi
+        b = files2[path]
+        if a == b:
+            print("GOOD:", path)
+        else:
+            print(" BAD:", path)
