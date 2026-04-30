@@ -68,11 +68,14 @@ files1 = {}
 files2 = {}
 
 for ff in files1_paths:
-    files1[ff] = FileInformation(ff)
+    fp = os.path.relpath(ff, start="/home/daspork/repos/test/")
+    files1[fp] = FileInformation(ff)
 
 for ff in files2_paths:
-    files2[ff] = FileInformation(ff)
+    fp = os.path.relpath(ff, start="/home/daspork/repos/test/")
+    files2[fp] = FileInformation(ff)
 
+print(files2)
 
 for path, fi in files1.items():
     print(path)
