@@ -18,4 +18,4 @@ def main(image):
     sys.exit(app.exec_())
 
 if __name__ == '__main__':
-    main('./assets/sync.png')
+    main('./assets/idle.png')
