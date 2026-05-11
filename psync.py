@@ -5,7 +5,9 @@ import glob
 import tomllib
 import hashlib
 import os
+from pathlib import Path
 import time
+from typing import Dict
 
 import watchdog
 
@@ -22,14 +24,14 @@ def get_short_hash(filename):
     return h
 
 class FileInformation(object):
-    def __init__(self, file_path):
-        self.file_path = file_path
+    def __init__(self, file_path: str):
+        self.file_path = Path(file_path)
         self._hash = None
         self._short_hash = None
-        metadata = os.stat(file_path)
+        metadata = self.file_path.stat()
         self.size = metadata.st_size
-        self.last_accessed = time.ctime(metadata.st_atime)
-        self.last_modified = time.ctime(metadata.st_mtime)
+        self.last_accessed = metadata.st_atime
+        self.last_modified = metadata.st_mtime
     
     def __eq__(self, other):
         if isinstance(other, self.__class__):
@@ -67,19 +69,22 @@ print(get_short_hash("settings.toml"))
 file_info = FileInformation("settings.toml")
 file_info.dump()
 
-files1_paths = glob.glob('/home/daspork/repos/test/folder1/**/*.*', recursive=True)
-files2_paths = glob.glob('/home/daspork/repos/test/folder2/**/*.*', recursive=True)
+# Use paths from configuration or arguments
+folder1_base = Path('/home/daspork/repos/test/folder1')
+folder2_base = Path('/home/daspork/repos/test/folder2')
 
-files1 = {}
-files2 = {}
+files1: Dict[str, FileInformation] = {}
+files2: Dict[str, FileInformation] = {}
 
-for ff in files1_paths:
-    fp = os.path.relpath(ff, start="/home/daspork/repos/test/folder1/")
-    files1[fp] = FileInformation(ff)
+for ff in folder1_base.rglob('*'):
+    if ff.is_file():
+        rel_path = str(ff.relative_to(folder1_base))
+        files1[rel_path] = FileInformation(str(ff))
 
-for ff in files2_paths:
-    fp = os.path.relpath(ff, start="/home/daspork/repos/test/folder2/")
-    files2[fp] = FileInformation(ff)
+for ff in folder2_base.rglob('*'):
+    if ff.is_file():
+        rel_path = str(ff.relative_to(folder2_base))
+        files2[rel_path] = FileInformation(str(ff))
 
 for path, fi in files1.items():
     if path in files2:
