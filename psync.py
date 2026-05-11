@@ -53,13 +53,29 @@ def process_file_change(path: str, base_path: str, ignore_patterns: list[str], e
             log_msg += f" (from {source_path})"
         logger.info(f"{log_msg} [Revision: {fi.short_hash}]")
 
-def scan_untracked_files(base_path: str, ignore_patterns: list[str]):
-    """Scans the directory for new or restored files and updates the database."""
-    logger.info(f"Scanning {base_path} for untracked files and updates...")
+def scan_files(base_path: str, ignore_patterns: list[str]):
+    """Scans the directory for new, modified, or deleted files and updates the database."""
+    logger.info(f"Scanning {base_path} for changes...")
+    found_rel_paths = set()
+
     with db.atomic():
+        # Scan disk for new and modified files
         for ff in Path(base_path).rglob('*'):
-            if ff.is_file():
+            if ff.is_file() and not is_ignored(str(ff), base_path, ignore_patterns):
+                rel_path = str(ff.relative_to(base_path))
                 process_file_change(str(ff), base_path, ignore_patterns, "Indexed")
+                found_rel_paths.add(rel_path)
+
+        # Check database for files that no longer exist on disk
+        active_db_files = File.select().where(
+            (File.base_path == base_path) & (File.is_deleted == False)
+        )
+        for file_record in active_db_files:
+            if file_record.relative_path not in found_rel_paths:
+                file_record.is_deleted = True
+                file_record.updated_at = datetime.now()
+                file_record.save()
+                logger.info(f"Detected deletion during scan: {file_record.relative_path}")
 
 def generate_json_dump():
     """
@@ -214,7 +230,7 @@ def sync():
     folder1_base = Path('/home/daspork/repos/test/folder1')
     folder2_base = Path('/home/daspork/repos/test/folder2')
 
-    scan_untracked_files(str(folder1_base), ignore_patterns)
+    scan_files(str(folder1_base), ignore_patterns)
 
     files1: Dict[str, FileInformation] = {}
     files2: Dict[str, FileInformation] = {}
@@ -254,7 +270,7 @@ def watch():
     base_path = str(Path(core_settings.get("base_path", ".")).expanduser().resolve())
     ignore_patterns = core_settings.get("ignore", [])
 
-    scan_untracked_files(base_path, ignore_patterns)
+    scan_files(base_path, ignore_patterns)
 
     event_handler = SyncHandler(base_path, ignore_patterns)
     observer = Observer()
@@ -276,7 +292,7 @@ if __name__ == "__main__":
     parser.add_argument("--watch", action="store_true", help="Watch the directories for changes")
     parser.add_argument("--dump-json", action="store_true", help="Dump all file information from the database as pretty-printed JSON")
     parser.add_argument("--dump-delta", action="store_true", help="Dump files changed since the last sync as JSON")
-    parser.add_argument("-p", "--profile", action="store_true", help="Run the profiler to find bottlenecks")
+    parser.add_argument("--profile", action="store_true", help="Run the profiler to find bottlenecks")
     args = parser.parse_args()
 
     if args.watch:
