@@ -27,11 +27,27 @@ class File(BaseModel):
 
     @property
     def latest_revision(self):
+        """Returns the most recent FileRevision for this file."""
         return FileRevision.select().where(FileRevision.file == self).order_by(FileRevision.created_at.desc()).first()
 
     @property
     def all_revisions(self):
+        """Returns all FileRevision records for this file, ordered by creation date descending."""
         return FileRevision.select().where(FileRevision.file == self).order_by(FileRevision.created_at.desc())
+    
+    @classmethod
+    def get_all_files_data(cls):
+        files_data = []
+        for file_record in cls.select():
+            latest = file_record.latest_revision
+            if latest:
+                files_data.append({
+                    "f": file_record.relative_path,
+                    "h": latest.full_hash,
+                    "d": file_record.is_deleted
+                })
+        return files_data
+        
 
 class FileRevision(BaseModel):
     """Represents a specific version or revision of a File."""
@@ -53,4 +69,5 @@ def init_db():
     db.create_tables([File, FileRevision, ApplicationState])
 
 def close_db():
+    """Closes the database connection."""
     db.close()
