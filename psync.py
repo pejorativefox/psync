@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 
 import argparse
-import glob
+import logging
+import fnmatch
 import tomllib
+import sys
 import cProfile
-import hashlib
 import os
 from datetime import datetime
 from pathlib import Path
 import time
 from typing import Dict
 
-import watchdog
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 import xxhash
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
+logger = logging.getLogger(__name__)
 
 def get_hash(filename):
     hasher = xxhash.xxh64()
@@ -70,8 +75,55 @@ def load_settings():
     with open("settings.toml", "rb") as settings_fd:
         return tomllib.load(settings_fd)
 
+def is_ignored(path: str, base_path: str, ignore_patterns: list[str]):
+    if not ignore_patterns:
+        return False
+    try:
+        rel_path = os.path.relpath(path, base_path)
+    except ValueError:
+        return False
+
+    parts = Path(rel_path).parts
+    for pattern in ignore_patterns:
+        p = pattern.rstrip('/')
+        # Check if any directory in the path matches the pattern
+        if any(fnmatch.fnmatch(part, p) for part in parts):
+            return True
+        # Check if the filename or relative path matches
+        if fnmatch.fnmatch(rel_path, p) or fnmatch.fnmatch(os.path.basename(path), p):
+            return True
+    return False
+
+class SyncHandler(FileSystemEventHandler):
+    def __init__(self, base_path: str, ignore_patterns: list[str]):
+        super().__init__()
+        self.base_path = base_path
+        self.ignore_patterns = ignore_patterns
+
+    def on_modified(self, event):
+        if not event.is_directory and not is_ignored(str(event.src_path), self.base_path, self.ignore_patterns):
+            fi = FileInformation(str(event.src_path))
+            logger.info(f"Modified: {event.src_path} [Hash: {fi.short_hash}]")
+
+    def on_created(self, event):
+        if not event.is_directory and not is_ignored(str(event.src_path), self.base_path, self.ignore_patterns):
+            fi = FileInformation(str(event.src_path))
+            logger.info(f"Created: {event.src_path} [Hash: {fi.short_hash}]")
+
+    def on_deleted(self, event):
+        if not event.is_directory and not is_ignored(str(event.src_path), self.base_path, self.ignore_patterns):
+            # FileInformation cannot be created for deleted files as they no longer exist on disk.
+            logger.info(f"Deleted: {event.src_path}")
+
+    def on_moved(self, event):
+        if not event.is_directory and not is_ignored(str(event.dest_path), self.base_path, self.ignore_patterns):
+            fi = FileInformation(str(event.dest_path))
+            logger.info(f"Moved: {event.src_path} to {event.dest_path} [Hash: {fi.short_hash}]")
+
 def sync():
+    logger.info("Starting synchronization...")
     settings_data = load_settings()
+    ignore_patterns = settings_data.get("core", {}).get("ignore", [])
 
     # Use paths from configuration or arguments
     folder1_base = Path('/home/daspork/repos/test/folder1')
@@ -81,12 +133,12 @@ def sync():
     files2: Dict[str, FileInformation] = {}
 
     for ff in folder1_base.rglob('*'):
-        if ff.is_file():
+        if ff.is_file() and not is_ignored(str(ff), str(folder1_base), ignore_patterns):
             rel_path = str(ff.relative_to(folder1_base))
             files1[rel_path] = FileInformation(str(ff))
 
     for ff in folder2_base.rglob('*'):
-        if ff.is_file():
+        if ff.is_file() and not is_ignored(str(ff), str(folder2_base), ignore_patterns):
             rel_path = str(ff.relative_to(folder2_base))
             files2[rel_path] = FileInformation(str(ff))
 
@@ -106,13 +158,23 @@ def sync():
 
 def watch():
     settings_data = load_settings()
-    print("Starting watch mode...")
-    # This is a placeholder for the future watchdog observer implementation.
+    core_settings = settings_data.get("core", {})
+    base_path = str(Path(core_settings.get("base_path", ".")).expanduser().resolve())
+    ignore_patterns = core_settings.get("ignore", [])
+
+    event_handler = SyncHandler(base_path, ignore_patterns)
+    observer = Observer()
+    observer.schedule(event_handler, base_path, recursive=True)
+
+    logger.info(f"Starting watch mode on: {base_path}")
+    observer.start()
+
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\nWatcher stopped.")
+        observer.stop()
+    observer.join()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Psync: A simple file synchronization tool.")
@@ -121,10 +183,9 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--profile", action="store_true", help="Run the profiler to find bottlenecks")
     args = parser.parse_args()
 
-    # Priority is given to watch mode; otherwise, it defaults to the sync logic.
     if args.watch:
         watch()
-    else:
+    elif args.sync:
         if args.profile:
             profiler = cProfile.Profile()
             profiler.enable()
@@ -133,3 +194,5 @@ if __name__ == "__main__":
             profiler.print_stats(sort='cumulative')
         else:
             sync()
+    else:
+        parser.print_help()
