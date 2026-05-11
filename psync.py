@@ -13,99 +13,53 @@ from pathlib import Path
 import time
 from typing import Dict
 
-import peewee
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import xxhash
 
+from database import db, File, FileRevision, ApplicationState, init_db, close_db
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
-# Database setup
-# The database file 'psync.db' will be created in the same directory as psync.py
-db = peewee.SqliteDatabase('psync.db')
+def process_file_change(path: str, base_path: str, ignore_patterns: list[str], event_type: str, source_path: str = ""):
+    """Central logic to handle file creation, modification, or movement."""
+    if is_ignored(path, base_path, ignore_patterns):
+        return
 
-class BaseModel(peewee.Model):
-    """A base model that will use our SQLite database."""
-    class Meta:
-        database = db
+    rel_path = str(Path(path).relative_to(base_path))
+    file_obj, created = File.get_or_create(
+        relative_path=rel_path,
+        base_path=base_path
+    )
 
-class File(BaseModel):
-    """
-    Represents a file being tracked by psync.
-    A file is uniquely identified by its relative_path within a specific base_path.
-    """
-    # The path of the file relative to its base_path (e.g., 'src/main.py')
-    relative_path = peewee.CharField()
-    # The absolute base path this file belongs to (e.g., '/home/user/sync_folder_A')
-    base_path = peewee.CharField()
-    # Whether the file is currently deleted on the file system
-    is_deleted = peewee.BooleanField(default=False)
-    # Last time the file record was updated (creation, modification, or deletion)
-    updated_at = peewee.DateTimeField(default=datetime.now)
-    
-    class Meta:
-        # Ensure that the combination of relative_path and base_path is unique
-        # This prevents tracking the same logical file multiple times within the same base.
-        indexes = (
-            (('relative_path', 'base_path'), True),
+    fi = FileInformation(path)
+    latest = file_obj.latest_revision
+
+    recreated = file_obj.is_deleted
+    if created or recreated or latest is None or latest.full_hash != fi.hash:
+        file_obj.is_deleted = False
+        file_obj.updated_at = datetime.now()
+        file_obj.save()
+        FileRevision.create(
+            file=file_obj,
+            full_hash=fi.hash,
+            short_hash=fi.short_hash,
+            size=fi.size,
+            last_modified=fi.last_modified
         )
-
-    @property
-    def latest_revision(self):
-        return FileRevision.select().where(FileRevision.file == self).order_by(FileRevision.created_at.desc()).first()
-
-    @property
-    def all_revisions(self):
-        return FileRevision.select().where(FileRevision.file == self).order_by(FileRevision.created_at.desc())
-
-class FileRevision(BaseModel):
-    """Represents a specific version or revision of a File."""
-    file = peewee.ForeignKeyField(File, backref='revisions')
-    full_hash = peewee.CharField() # Stores the xxh64 hash
-    short_hash = peewee.CharField() # Stores the xxh32 hash
-    size = peewee.IntegerField() # Size of the file in bytes
-    last_modified = peewee.DateTimeField() # Last modified timestamp from the file system
-    created_at = peewee.DateTimeField(default=datetime.now) # Timestamp when this revision record was created
-
-class ApplicationState(BaseModel):
-    """Stores general application metadata and state."""
-    key = peewee.CharField(unique=True)
-    value = peewee.DateTimeField()
-
-def init_db():
-    """Initializes the database connection and ensures tables are created."""
-    db.connect(reuse_if_open=True)
-    db.create_tables([File, FileRevision, ApplicationState])
+        log_msg = f"{event_type}: {rel_path}"
+        if source_path:
+            log_msg += f" (from {source_path})"
+        logger.info(f"{log_msg} [Revision: {fi.short_hash}]")
 
 def scan_untracked_files(base_path: str, ignore_patterns: list[str]):
     """Scans the directory for new or restored files and updates the database."""
-    logger.info(f"Scanning {base_path} for untracked files...")
+    logger.info(f"Scanning {base_path} for untracked files and updates...")
     with db.atomic():
         for ff in Path(base_path).rglob('*'):
-            if ff.is_file() and not is_ignored(str(ff), base_path, ignore_patterns):
-                rel_path = str(ff.relative_to(base_path))
-                # Ensure a record exists for this file in the database
-                file_obj, created = File.get_or_create(
-                    relative_path=rel_path,
-                    base_path=base_path
-                )
-                
-                recreated = file_obj.is_deleted
-                if created or recreated:
-                    file_obj.is_deleted = False
-                    file_obj.updated_at = datetime.now()
-                    file_obj.save()
-                    fi = FileInformation(str(ff))
-                    FileRevision.create(
-                        file=file_obj,
-                        full_hash=fi.hash,
-                        short_hash=fi.short_hash,
-                        size=fi.size,
-                        last_modified=fi.last_modified
-                    )
-                    msg = "Indexed new file" if created else "Restored deleted file"
-                    logger.info(f"{msg}: {rel_path} [Hash: {fi.short_hash}]")
+            if ff.is_file():
+                process_file_change(str(ff), base_path, ignore_patterns, "Indexed")
 
 def generate_json_dump():
     """
@@ -223,43 +177,13 @@ class SyncHandler(FileSystemEventHandler):
         self.base_path = base_path
         self.ignore_patterns = ignore_patterns
 
-    def _process_file_change(self, path: str, event_type: str, source_path: str = ""):
-        if is_ignored(path, self.base_path, self.ignore_patterns):
-            return
-
-        rel_path = str(Path(path).relative_to(self.base_path))
-        file_obj, created = File.get_or_create(
-            relative_path=rel_path,
-            base_path=self.base_path
-        )
-
-        fi = FileInformation(path)
-        latest = file_obj.latest_revision
-        
-        recreated = file_obj.is_deleted
-        if created or recreated or latest is None or latest.full_hash != fi.hash:
-            file_obj.is_deleted = False
-            file_obj.updated_at = datetime.now()
-            file_obj.save()
-            FileRevision.create(
-                file=file_obj,
-                full_hash=fi.hash,
-                short_hash=fi.short_hash,
-                size=fi.size,
-                last_modified=fi.last_modified
-            )
-            log_msg = f"{event_type}: {rel_path}"
-            if source_path:
-                log_msg += f" (from {source_path})"
-            logger.info(f"{log_msg} [Revision: {fi.short_hash}]")
-
     def on_modified(self, event):
         if not event.is_directory:
-            self._process_file_change(str(event.src_path), "Modified")
+            process_file_change(str(event.src_path), self.base_path, self.ignore_patterns, "Modified")
 
     def on_created(self, event):
         if not event.is_directory:
-            self._process_file_change(str(event.src_path), "Created")
+            process_file_change(str(event.src_path), self.base_path, self.ignore_patterns, "Created")
 
     def on_deleted(self, event):
         if not event.is_directory and not is_ignored(str(event.src_path), self.base_path, self.ignore_patterns):
@@ -278,7 +202,7 @@ class SyncHandler(FileSystemEventHandler):
                     (File.relative_path == rel_src) & (File.base_path == self.base_path)
                 ).execute()
             
-            self._process_file_change(str(event.dest_path), "Moved", source_path=str(event.src_path))
+            process_file_change(str(event.dest_path), self.base_path, self.ignore_patterns, "Moved", source_path=str(event.src_path))
 
 def sync():
     init_db()
@@ -375,4 +299,4 @@ if __name__ == "__main__":
     else:
         parser.print_help()
     
-    db.close()
+    close_db()
