@@ -12,12 +12,56 @@ from pathlib import Path
 import time
 from typing import Dict
 
+import peewee
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import xxhash
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
 logger = logging.getLogger(__name__)
+
+# Database setup
+# The database file 'psync.db' will be created in the same directory as psync.py
+db = peewee.SqliteDatabase('psync.db')
+
+class BaseModel(peewee.Model):
+    """A base model that will use our SQLite database."""
+    class Meta:
+        database = db
+
+class File(BaseModel):
+    """
+    Represents a file being tracked by psync.
+    A file is uniquely identified by its relative_path within a specific base_path.
+    """
+    # The path of the file relative to its base_path (e.g., 'src/main.py')
+    relative_path = peewee.CharField()
+    # The absolute base path this file belongs to (e.g., '/home/user/sync_folder_A')
+    base_path = peewee.CharField()
+    
+    class Meta:
+        # Ensure that the combination of relative_path and base_path is unique
+        # This prevents tracking the same logical file multiple times within the same base.
+        indexes = (
+            (('relative_path', 'base_path'), True),
+        )
+
+    @property
+    def latest_revision(self):
+        return FileRevision.select().where(FileRevision.file == self).order_by(FileRevision.created_at.desc()).first()
+
+    @property
+    def all_revisions(self):
+        return FileRevision.select().where(FileRevision.file == self).order_by(FileRevision.created_at.desc())
+
+class FileRevision(BaseModel):
+    """Represents a specific version or revision of a File."""
+    file = peewee.ForeignKeyField(File, backref='revisions')
+    full_hash = peewee.CharField() # Stores the xxh64 hash
+    short_hash = peewee.CharField() # Stores the xxh32 hash
+    size = peewee.IntegerField() # Size of the file in bytes
+    last_modified = peewee.DateTimeField() # Last modified timestamp from the file system
+    created_at = peewee.DateTimeField(default=datetime.now) # Timestamp when this revision record was created
 
 def get_hash(filename):
     hasher = xxhash.xxh64()
@@ -107,7 +151,20 @@ class SyncHandler(FileSystemEventHandler):
 
     def on_created(self, event):
         if not event.is_directory and not is_ignored(str(event.src_path), self.base_path, self.ignore_patterns):
+            rel_path = str(Path(str(event.src_path)).relative_to(self.base_path))
+            file_obj, created = File.get_or_create(
+                relative_path=rel_path,
+                base_path=self.base_path
+            )
             fi = FileInformation(str(event.src_path))
+            if created:
+                FileRevision.create(
+                    file=file_obj,
+                    full_hash=fi.hash,
+                    short_hash=fi.short_hash,
+                    size=fi.size,
+                    last_modified=fi.last_modified
+                )
             logger.info(f"Created: {event.src_path} [Hash: {fi.short_hash}]")
 
     def on_deleted(self, event):
@@ -117,7 +174,20 @@ class SyncHandler(FileSystemEventHandler):
 
     def on_moved(self, event):
         if not event.is_directory and not is_ignored(str(event.dest_path), self.base_path, self.ignore_patterns):
+            rel_path = str(Path(str(event.dest_path)).relative_to(self.base_path))
+            file_obj, created = File.get_or_create(
+                relative_path=rel_path,
+                base_path=self.base_path
+            )
             fi = FileInformation(str(event.dest_path))
+            if created:
+                FileRevision.create(
+                    file=file_obj,
+                    full_hash=fi.hash,
+                    short_hash=fi.short_hash,
+                    size=fi.size,
+                    last_modified=fi.last_modified
+                )
             logger.info(f"Moved: {event.src_path} to {event.dest_path} [Hash: {fi.short_hash}]")
 
 def sync():
@@ -162,6 +232,27 @@ def watch():
     base_path = str(Path(core_settings.get("base_path", ".")).expanduser().resolve())
     ignore_patterns = core_settings.get("ignore", [])
 
+    logger.info(f"Scanning {base_path} for untracked files...")
+    with db.atomic():
+        for ff in Path(base_path).rglob('*'):
+            if ff.is_file() and not is_ignored(str(ff), base_path, ignore_patterns):
+                rel_path = str(ff.relative_to(base_path))
+                # Ensure a record exists for this file in the database
+                file_obj, created = File.get_or_create(
+                    relative_path=rel_path,
+                    base_path=base_path
+                )
+                if created:
+                    fi = FileInformation(str(ff))
+                    FileRevision.create(
+                        file=file_obj,
+                        full_hash=fi.hash,
+                        short_hash=fi.short_hash,
+                        size=fi.size,
+                        last_modified=fi.last_modified
+                    )
+                    logger.info(f"Indexed new file: {rel_path} [Hash: {fi.short_hash}]")
+
     event_handler = SyncHandler(base_path, ignore_patterns)
     observer = Observer()
     observer.schedule(event_handler, base_path, recursive=True)
@@ -183,6 +274,10 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--profile", action="store_true", help="Run the profiler to find bottlenecks")
     args = parser.parse_args()
 
+    # Connect to the database and create tables before starting operations
+    db.connect()
+    db.create_tables([File, FileRevision])
+
     if args.watch:
         watch()
     elif args.sync:
@@ -196,3 +291,5 @@ if __name__ == "__main__":
             sync()
     else:
         parser.print_help()
+    
+    db.close()
