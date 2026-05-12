@@ -15,6 +15,27 @@ def get_files():
     init_db()
     return File.get_all_files_data()
 
+@app.get("/revisions/{relative_path:path}")
+def get_revisions(relative_path: str):
+    """API endpoint to get the history of revisions for a specific file."""
+    init_db()
+    file_record = File.get_or_none(
+        (File.relative_path == relative_path) & (File.base_path == BASE_PATH)
+    )
+    if not file_record:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return [
+        {
+            "full_hash": rev.full_hash,
+            "short_hash": rev.short_hash,
+            "size": rev.size,
+            "last_modified": rev.last_modified.isoformat(),
+            "created_at": rev.created_at.isoformat(),
+        }
+        for rev in file_record.all_revisions
+    ]
+
 @app.get("/down/{file_hash}")
 async def download_file(file_hash: str):
     """
