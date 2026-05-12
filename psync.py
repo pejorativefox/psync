@@ -5,19 +5,17 @@ import logging
 import sys
 import cProfile
 import json
-import os
 from datetime import datetime
 from pathlib import Path
 import time
-from typing import Dict
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 from server import run_server
-from file_info import FileInformation, process_file_change, scan_files, is_ignored
+from file_info import process_file_change, scan_files, is_ignored, upload_missing_to_server
 from database import File, ApplicationState, init_db, close_db
-from config import SETTINGS, BASE_PATH
+from config import BASE_PATH
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
 logger = logging.getLogger(__name__)
@@ -89,6 +87,7 @@ def sync():
 def watch():
     init_db()
     scan_files()
+    upload_missing_to_server()
 
     event_handler = SyncHandler()
     observer = Observer()

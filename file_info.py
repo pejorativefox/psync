@@ -190,3 +190,42 @@ def scan_files():
                 file_record.updated_at = datetime.now()
                 file_record.save()
                 logger.info(f"Detected deletion during scan: {file_record.relative_path}")
+
+def get_server_files():
+    """Fetches the list of files currently known by the server."""
+    core_settings = SETTINGS.get("core", {})
+    host = core_settings.get("server_hostname", "127.0.0.1")
+    port = core_settings.get("server_port", 8000)
+    url = f"http://{host}:{port}/files"
+
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        logger.error(f"Failed to retrieve file list from server: {e}")
+        return []
+
+def upload_missing_to_server():
+    """
+    Compares local database state with the server's file list and uploads 
+    any files that are missing or have mismatched hashes on the server.
+    """
+    server_files = get_server_files()
+    # Create a lookup for active server files: {relative_path: hash}
+    server_inventory = {f['f']: f['h'] for f in server_files if not f.get('d', False)}
+
+    # Get all local files that are not marked as deleted in our DB
+    local_files = File.select().where(File.is_deleted == False)
+    
+    for file_record in local_files:
+        latest = file_record.latest_revision
+        if not latest:
+            continue
+            
+        rel_path = file_record.relative_path
+        if rel_path not in server_inventory or server_inventory[rel_path] != latest.full_hash:
+            abs_path = os.path.join(BASE_PATH, rel_path)
+            if os.path.exists(abs_path):
+                logger.info(f"Uploading missing/mismatched file: {rel_path}")
+                upload_to_server(abs_path, rel_path, latest.full_hash)
