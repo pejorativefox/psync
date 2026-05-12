@@ -1,7 +1,26 @@
 import sys
+import signal
+from datetime import datetime
 import requests
-from PySide6 import QtWidgets, QtGui
+from PySide6 import QtWidgets, QtGui, QtCore
 from config import SETTINGS
+
+class FileRefreshThread(QtCore.QThread):
+    """Background thread to handle the network request for file listing."""
+    finished = QtCore.Signal(list)
+    error = QtCore.Signal(str)
+
+    def run(self):
+        try:
+            server_host = SETTINGS.get("core", {}).get("server_hostname", "127.0.0.1")
+            server_port = SETTINGS.get("core", {}).get("server_port", 8000)
+            url = f"http://{server_host}:{server_port}/files"
+            
+            response = requests.get(url, timeout=5)
+            response.raise_for_status()
+            self.finished.emit(response.json())
+        except Exception as e:
+            self.error.emit(str(e))
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -11,19 +30,30 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # Set up menu bar
         menubar = self.menuBar()
-        file_menu = menubar.addMenu("File")
-        exit_action = file_menu.addAction("Exit")
+        file_menu = menubar.addMenu("&File")
+        exit_action = file_menu.addAction("E&xit")
         exit_action.triggered.connect(QtWidgets.QApplication.instance().quit) # pyright: ignore[reportOptionalMemberAccess]
 
         # Set up the central layout
         container = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(container)
 
-        # Fuzzy finder search box
+        # Fuzzy finder search box and clear button
+        search_layout = QtWidgets.QHBoxLayout()
         self.search_box = QtWidgets.QLineEdit()
         self.search_box.setPlaceholderText("Fuzzy find files...")
         self.search_box.textChanged.connect(self.filter_file_list)
-        layout.addWidget(self.search_box)
+
+        self.clear_button = QtWidgets.QPushButton("Clear")
+        self.clear_button.clicked.connect(self.search_box.clear)
+
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
+        self.refresh_button.clicked.connect(self.refresh_file_list)
+
+        search_layout.addWidget(self.search_box)
+        search_layout.addWidget(self.clear_button)
+        search_layout.addWidget(self.refresh_button)
+        layout.addLayout(search_layout)
 
         # File list widget
         self.list_widget = QtWidgets.QListWidget()
@@ -35,34 +65,58 @@ class MainWindow(QtWidgets.QMainWindow):
         self.revisions_button.clicked.connect(self.on_revisions_clicked)
         layout.addWidget(self.revisions_button)
 
+        # Initialize the status bar
+        self.statusBar().showMessage("Ready")
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setRange(0, 0)  # Indeterminate mode
+        self.progress_bar.setMaximumWidth(150)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.hide()
+        self.statusBar().addPermanentWidget(self.progress_bar)
+
+        # Set up the background refresh thread
+        self.refresh_thread = FileRefreshThread()
+        self.refresh_thread.finished.connect(self.on_refresh_finished)
+        self.refresh_thread.error.connect(self.on_refresh_error)
+
         self.setCentralWidget(container)
         
         self.refresh_file_list()
 
     def refresh_file_list(self):
-        """Queries the server for the canonical list of files and populates the view."""
-        server_host = SETTINGS.get("core", {}).get("server_hostname", "127.0.0.1")
-        server_port = SETTINGS.get("core", {}).get("server_port", 8000)
-        url = f"http://{server_host}:{server_port}/files"
+        """Starts the background thread to query the server."""
+        if self.refresh_thread.isRunning():
+            return
 
-        try:
-            # Fetch the JSON dump of all tracked files from the server
-            response = requests.get(url, timeout=5)
-            response.raise_for_status()
-            files_data = response.json()
+        self.statusBar().showMessage("Refreshing file list...")
+        self.progress_bar.show()
+        self.refresh_button.setEnabled(False)
+        self.refresh_thread.start()
 
-            self.list_widget.clear()
-            for entry in files_data:
-                display_name = entry.get("f", "Unknown")
-                if entry.get("d"):
-                    display_name += " (Deleted)"
-                self.list_widget.addItem(display_name)
+    def on_refresh_finished(self, files_data):
+        """Updates the UI once the background thread finishes successfully."""
+        self.list_widget.clear()
+        for entry in files_data:
+            display_name = entry.get("f", "Unknown")
+            if entry.get("d"):
+                display_name += " (Deleted)"
+            self.list_widget.addItem(display_name)
 
-            # Re-apply filter if text was already present during refresh
-            self.filter_file_list(self.search_box.text())
-        except Exception as e:
-            self.list_widget.clear()
-            self.list_widget.addItem(f"Error connecting to server: {e}")
+        # Re-apply filter if text was already present during refresh
+        self.filter_file_list(self.search_box.text())
+
+        # Update the status bar with the current time
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.statusBar().showMessage(f"Last updated: {now}")
+        self.progress_bar.hide()
+        self.refresh_button.setEnabled(True)
+
+    def on_refresh_error(self, error_message):
+        """Handles errors reported by the background thread."""
+        self.list_widget.clear()
+        self.list_widget.addItem(f"Error connecting to server: {error_message}")
+        self.progress_bar.hide()
+        self.refresh_button.setEnabled(True)
 
     def filter_file_list(self, text):
         """Filters the file list based on search text (case-insensitive)."""
@@ -137,7 +191,7 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
     def __init__(self, icon, parent=None):
         QtWidgets.QSystemTrayIcon.__init__(self, icon, parent)
         menu = QtWidgets.QMenu(parent)
-        exit_action = menu.addAction("Exit")
+        exit_action = menu.addAction("E&xit")
         exit_action.triggered.connect(QtWidgets.QApplication.instance().quit) # pyright: ignore[reportOptionalMemberAccess]
         self.setContextMenu(menu)
 
@@ -160,6 +214,8 @@ class PsyncApp(QtWidgets.QApplication):
                 self.window.activateWindow()
 
 def main(image):
+    # Allow the application to be terminated with Ctrl+C in the terminal
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     app = PsyncApp(sys.argv, image)
     sys.exit(app.exec())
 
