@@ -1,5 +1,5 @@
 [core]
-base_path = "/home/daspork/repos/test/folder1/"
+base_path = "/home/daspork/repos/test/folder3/"
 ignore = [".git/", "__pycache__/", "*.pyc", ".DS_Store"]
 server_hostname = "127.0.0.1"
 server_port = 8000

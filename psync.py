@@ -13,7 +13,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 from server import run_server
-from file_info import process_file_change, scan_files, is_ignored, upload_missing_to_server
+from file_info import process_file_change, scan_files, upload_missing_to_server, download_missing_from_server, handle_deletion
 from database import File, ApplicationState, init_db, close_db
 from config import BASE_PATH
 
@@ -58,36 +58,27 @@ class SyncHandler(FileSystemEventHandler):
             process_file_change(str(event.src_path), "Created")
 
     def on_deleted(self, event):
-        if not event.is_directory and not is_ignored(str(event.src_path)):
-            rel_path = str(Path(str(event.src_path)).relative_to(BASE_PATH))
-            File.update(is_deleted=True, updated_at=datetime.now()).where(
-                (File.relative_path == rel_path) & (File.base_path == BASE_PATH)
-            ).execute()
-            logger.info(f"Deleted: {rel_path}")
+        if not event.is_directory:
+            handle_deletion(str(event.src_path))
 
     def on_moved(self, event):
         if not event.is_directory:
             # Mark the source path as deleted
-            if not is_ignored(str(event.src_path)):
-                rel_src = str(Path(str(event.src_path)).relative_to(BASE_PATH))
-                File.update(is_deleted=True, updated_at=datetime.now()).where(
-                    (File.relative_path == rel_src) & (File.base_path == BASE_PATH)
-                ).execute()
-            
+            handle_deletion(str(event.src_path))
             process_file_change(str(event.dest_path), "Moved", source_path=str(event.src_path))
 
 def sync():
     init_db()
     logger.info("Starting synchronization...")
     scan_files()
+    download_missing_from_server()
+    upload_missing_to_server()
 
     # Update the last sync time in the database
     ApplicationState.replace(key='last_sync', value=datetime.now()).execute()
 
 def watch():
-    init_db()
-    scan_files()
-    upload_missing_to_server()
+    sync()
 
     event_handler = SyncHandler()
     observer = Observer()

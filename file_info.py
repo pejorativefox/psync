@@ -88,7 +88,7 @@ def upload_to_server(path: str, rel_path: str, file_hash: str):
     except Exception as e:
         logger.error(f"Failed to upload {rel_path} to server: {e}")
 
-def process_file_change(path: str, event_type: str, source_path: str = ""):
+def process_file_change(path: str, event_type: str, source_path: str = "", skip_upload: bool = False):
     """
     Central logic to handle file creation, modification, or movement, updating the database.
 
@@ -96,8 +96,14 @@ def process_file_change(path: str, event_type: str, source_path: str = ""):
         path (str): The path to the file that changed.
         event_type (str): The type of file system event (e.g., "Created", "Modified", "Indexed").
         source_path (str, optional): The original path for 'moved' events. Defaults to "".
+        skip_upload (bool): If True, skips uploading the file to the server. Defaults to False.
     """
     if is_ignored(path):
+        return
+
+    # Ensure the file still exists before processing. Temporary files (like .part)
+    # are often deleted or moved before the event handler can run.
+    if not os.path.exists(path) or not os.path.isfile(path):
         return
 
     rel_path = str(Path(path).relative_to(BASE_PATH))
@@ -123,12 +129,46 @@ def process_file_change(path: str, event_type: str, source_path: str = ""):
         )
         
         # Upload the file to the server
-        upload_to_server(path, rel_path, fi.hash)
+        if not skip_upload:
+            upload_to_server(path, rel_path, fi.hash)
         
         log_msg = f"{event_type}: {rel_path}"
         if source_path:
             log_msg += f" (from {source_path})"
         logger.info(f"{log_msg} [Revision: {fi.short_hash}]")
+
+def delete_from_server(rel_path: str):
+    """Sends a DELETE request to the server to mark a file as deleted."""
+    core_settings = SETTINGS.get("core", {})
+    host = core_settings.get("server_hostname", "127.0.0.1")
+    port = core_settings.get("server_port", 8000)
+    url = f"http://{host}:{port}/files/{rel_path}"
+
+    try:
+        response = requests.delete(url, timeout=10)
+        response.raise_for_status()
+    except Exception as e:
+        logger.error(f"Failed to notify server of deletion for {rel_path}: {e}")
+
+def handle_deletion(path: str):
+    """Marks a file as deleted locally and notifies the server."""
+    if is_ignored(path):
+        return
+
+    try:
+        rel_path = str(Path(path).relative_to(BASE_PATH))
+    except ValueError:
+        return
+
+    # Update local DB
+    query = File.update(is_deleted=True, updated_at=datetime.now()).where(
+        (File.relative_path == rel_path) & (File.base_path == BASE_PATH)
+    )
+    affected = query.execute()
+    
+    if affected > 0:
+        logger.info(f"Deleted: {rel_path}")
+        delete_from_server(rel_path)
 
 class FileInformation(object):
     """Encapsulates file metadata and provides lazy-loaded hashing functionality."""
@@ -190,6 +230,7 @@ def scan_files():
                 file_record.updated_at = datetime.now()
                 file_record.save()
                 logger.info(f"Detected deletion during scan: {file_record.relative_path}")
+                delete_from_server(file_record.relative_path)
 
 def get_server_files():
     """Fetches the list of files currently known by the server."""
@@ -211,6 +252,7 @@ def upload_missing_to_server():
     Compares local database state with the server's file list and uploads 
     any files that are missing or have mismatched hashes on the server.
     """
+    logger.info("Checking server for missing or mismatched files...")
     server_files = get_server_files()
     # Create a lookup for active server files: {relative_path: hash}
     server_inventory = {f['f']: f['h'] for f in server_files if not f.get('d', False)}
@@ -218,6 +260,7 @@ def upload_missing_to_server():
     # Get all local files that are not marked as deleted in our DB
     local_files = File.select().where(File.is_deleted == False)
     
+    uploaded_count = 0
     for file_record in local_files:
         latest = file_record.latest_revision
         if not latest:
@@ -229,3 +272,62 @@ def upload_missing_to_server():
             if os.path.exists(abs_path):
                 logger.info(f"Uploading missing/mismatched file: {rel_path}")
                 upload_to_server(abs_path, rel_path, latest.full_hash)
+                uploaded_count += 1
+
+    if uploaded_count == 0:
+        logger.info("Server is already up to date with local files.")
+    else:
+        logger.info(f"Upload reconciliation complete. {uploaded_count} files uploaded.")
+
+def download_file_from_server(file_hash: str, local_path: str):
+    """Downloads a file from the server by its hash."""
+    core_settings = SETTINGS.get("core", {})
+    host = core_settings.get("server_hostname", "127.0.0.1")
+    port = core_settings.get("server_port", 8000)
+    url = f"http://{host}:{port}/down/{file_hash}"
+
+    try:
+        response = requests.get(url, stream=True, timeout=30)
+        response.raise_for_status()
+        
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        with open(local_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to download hash {file_hash} to {local_path}: {e}")
+        return False
+
+def download_missing_from_server():
+    """Fetches server file list and downloads anything missing or outdated locally."""
+    logger.info("Checking local storage for missing or mismatched files from server...")
+    server_files = get_server_files()
+    
+    downloaded_count = 0
+    for s_file in server_files:
+        if s_file.get('d', False):
+            continue
+            
+        rel_path = s_file['f']
+        server_hash = s_file['h']
+        abs_path = os.path.join(BASE_PATH, rel_path)
+        
+        needs_download = False
+        if not os.path.exists(abs_path):
+            needs_download = True
+        else:
+            # Calculate local hash to see if it matches the server
+            if get_hash(abs_path) != server_hash:
+                needs_download = True
+        
+        if needs_download:
+            logger.info(f"Downloading missing/mismatched file from server: {rel_path}")
+            if download_file_from_server(server_hash, abs_path):
+                process_file_change(abs_path, "Downloaded", skip_upload=True)
+                downloaded_count += 1
+
+    if downloaded_count == 0:
+        logger.info("Local storage is already up to date with server.")
+    else:
+        logger.info(f"Download reconciliation complete. {downloaded_count} files downloaded.")
