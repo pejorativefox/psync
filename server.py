@@ -9,6 +9,12 @@ import os
 
 app = FastAPI()
 
+@app.on_event("startup")
+async def startup_event():
+    """Initializes the database and ensures the data directory exists on startup."""
+    init_db()
+    os.makedirs(DATA_PATH, exist_ok=True)
+
 @app.get("/files")
 def get_files():
     """API endpoint to serve the JSON dump of all tracked files."""
@@ -162,7 +168,4 @@ async def upload_file(
 
 def run_server(host: str = "0.0.0.0", port: int = 8000):
     """Starts the FastAPI server using uvicorn."""
-    init_db()
-    # Ensure data directory exists once at startup
-    os.makedirs(DATA_PATH, exist_ok=True)
     uvicorn.run(app, host=host, port=port)

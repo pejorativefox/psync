@@ -1,8 +1,11 @@
 import peewee
 from datetime import datetime
+import os
 
 # Database setup
-db = peewee.SqliteDatabase('psync.db', pragmas={
+db_path = os.environ.get("DATABASE_PATH", "psync.db")
+
+db = peewee.SqliteDatabase(db_path, pragmas={
     'journal_mode': 'wal',      # Write-Ahead Logging for much faster writes
     'cache_size': -1 * 64000,   # 64MB cache
     'foreign_keys': 1,
@@ -81,6 +84,9 @@ class ApplicationState(BaseModel):
 
 def init_db():
     """Initializes the database connection and ensures tables are created."""
+    db_dir = os.path.dirname(db_path)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     db.connect(reuse_if_open=True)
     db.create_tables([File, FileRevision, ApplicationState])
 
