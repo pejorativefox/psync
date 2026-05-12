@@ -124,6 +124,88 @@ def process_file_change(path: str, event_type: str, source_path: str = "", skip_
             log_msg += f" (from {source_path})"
         logger.info(f"{log_msg} [Revision: {fi.short_hash}]")
 
+def handle_move(src_path: str, dest_path: str):
+    """
+    Handles a file move event by updating the local database and 
+    notifying the server via a specialized move endpoint.
+    """
+    if is_ignored(src_path) and is_ignored(dest_path):
+        return
+        
+    if is_ignored(src_path):
+        process_file_change(dest_path, "Created")
+        return
+        
+    if is_ignored(dest_path):
+        handle_deletion(src_path)
+        return
+
+    try:
+        rel_src = str(Path(src_path).relative_to(BASE_PATH))
+        rel_dst = str(Path(dest_path).relative_to(BASE_PATH))
+    except (ValueError, Exception):
+        return
+
+    if rel_src == rel_dst:
+        return
+
+    # Try to perform an optimized move in the local DB
+    success = False
+    with db.atomic():
+        # Find all files that are either the file itself or children of the moved directory
+        targets = File.select().where(
+            (File.base_path == BASE_PATH) & 
+            (File.is_deleted == False) &
+            ((File.relative_path == rel_src) | (File.relative_path.startswith(rel_src + "/")))
+        )
+
+        for old_file in targets:
+            latest = old_file.latest_revision
+            if latest:
+                if old_file.relative_path == rel_src:
+                    target_path = rel_dst
+                else:
+                    suffix = old_file.relative_path[len(rel_src):]
+                    target_path = rel_dst + suffix
+
+                old_file.is_deleted = True
+                old_file.updated_at = datetime.now()
+                old_file.save()
+
+                new_file, _ = File.get_or_create(relative_path=target_path, base_path=BASE_PATH)
+                new_file.is_deleted = False
+                new_file.updated_at = datetime.now()
+                new_file.save()
+
+                FileRevision.create(
+                    file=new_file,
+                    full_hash=latest.full_hash,
+                    short_hash=latest.short_hash,
+                    size=latest.size,
+                    last_modified=latest.last_modified
+                )
+                success = True
+
+    if not success and os.path.isdir(dest_path):
+        return # Nothing in DB to move for this directory
+
+    if success:
+        # Notify server of the move
+        core_settings = SETTINGS.get("core", {})
+        host = core_settings.get("server_hostname", "127.0.0.1")
+        port = core_settings.get("server_port", 8000)
+        url = f"http://{host}:{port}/move"
+        try:
+            response = requests.post(url, data={"old_path": rel_src, "new_path": rel_dst}, timeout=10)
+            response.raise_for_status()
+            logger.info(f"Moved: {rel_src} -> {rel_dst}")
+            return
+        except Exception as e:
+            logger.error(f"Failed to notify server of move: {e}")
+    
+    # Fallback to standard change processing (hash + upload) if optimized move fails
+    process_file_change(dest_path, "Moved", source_path=src_path)
+
 def delete_from_server(rel_path: str):
     """Sends a DELETE request to the server to mark a file as deleted."""
     core_settings = SETTINGS.get("core", {})

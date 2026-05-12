@@ -13,7 +13,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 from server import run_server
-from file_info import process_file_change, scan_files, upload_missing_to_server, download_missing_from_server, handle_deletion
+from file_info import process_file_change, scan_files, upload_missing_to_server, download_missing_from_server, handle_deletion, handle_move
 from database import File, ApplicationState, init_db, close_db
 from config import BASE_PATH
 
@@ -64,10 +64,7 @@ class SyncHandler(FileSystemEventHandler):
             handle_deletion(str(event.src_path))
 
     def on_moved(self, event):
-        if not event.is_directory:
-            # Mark the source path as deleted
-            handle_deletion(str(event.src_path))
-            process_file_change(str(event.dest_path), "Moved", source_path=str(event.src_path))
+        handle_move(str(event.src_path), str(event.dest_path))
 
 def sync():
     init_db()
@@ -112,6 +109,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Psync: A simple file synchronization tool.")
     parser.add_argument("--sync", action="store_true", help="Perform a one-time synchronization")
     parser.add_argument("--watch", action="store_true", help="Watch the directories for changes")
+    parser.add_argument("--gui", action="store_true", help="Start the Qt GUI application")
     parser.add_argument("--server", action="store_true", help="Start the FastAPI server")
     parser.add_argument("--dump-json", action="store_true", help="Dump all file information from the database as pretty-printed JSON")
     parser.add_argument("--dump-delta", action="store_true", help="Dump files changed since the last sync as JSON")
@@ -120,6 +118,9 @@ if __name__ == "__main__":
 
     if args.watch:
         watch()
+    elif args.gui:
+        from tray import main as run_gui
+        run_gui('assets/idle.png')
     elif args.server:
         start_server()
     elif args.sync:
@@ -138,6 +139,7 @@ if __name__ == "__main__":
         json_output = generate_delta_json_dump()
         print(json_output)
     else:
-        parser.print_help()
+        from tray import main as run_gui
+        run_gui('assets/idle.png')
     
     close_db()

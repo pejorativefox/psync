@@ -6,7 +6,19 @@ from datetime import datetime
 import requests
 from PySide6 import QtWidgets, QtGui, QtCore
 from config import SETTINGS
-from psync import watch, stop_watching
+from psync import sync as run_psync, watch, stop_watching
+
+class SyncWorkerThread(QtCore.QThread):
+    """Background thread to run the full synchronization logic."""
+    finished = QtCore.Signal()
+    error = QtCore.Signal(str)
+
+    def run(self):
+        try:
+            run_psync()
+            self.finished.emit()
+        except Exception as e:
+            self.error.emit(str(e))
 
 class FileRefreshThread(QtCore.QThread):
     """Background thread to handle the network request for file listing."""
@@ -71,12 +83,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.clear_button = QtWidgets.QPushButton("Clear")
         self.clear_button.clicked.connect(self.search_box.clear)
 
-        self.refresh_button = QtWidgets.QPushButton("Refresh")
-        self.refresh_button.clicked.connect(self.refresh_file_list)
+        self.sync_button = QtWidgets.QPushButton("Sync")
+        self.sync_button.clicked.connect(self.start_sync)
 
         search_layout.addWidget(self.search_box)
         search_layout.addWidget(self.clear_button)
-        search_layout.addWidget(self.refresh_button)
+        search_layout.addWidget(self.sync_button)
         layout.addLayout(search_layout)
 
         # File list widget
@@ -110,9 +122,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_thread.finished.connect(self.on_refresh_finished)
         self.refresh_thread.error.connect(self.on_refresh_error)
 
+        # Set up the background sync thread
+        self.sync_worker = SyncWorkerThread()
+        self.sync_worker.finished.connect(self.on_sync_finished)
+        self.sync_worker.error.connect(self.on_sync_error)
+
         self.setCentralWidget(container)
         
         self.refresh_file_list()
+
+    def start_sync(self):
+        """Starts the full synchronization process."""
+        if self.sync_worker.isRunning() or self.refresh_thread.isRunning():
+            return
+
+        self.statusBar().showMessage("Synchronizing...")
+        self.progress_bar.show()
+        self.sync_button.setEnabled(False)
+        self.sync_worker.start()
+
+    def on_sync_finished(self):
+        """Called when manual sync completes; triggers file list refresh."""
+        self.refresh_file_list()
+
+    def on_sync_error(self, error_message):
+        self.statusBar().showMessage(f"Sync Error: {error_message}")
+        self.progress_bar.hide()
+        self.sync_button.setEnabled(True)
 
     def refresh_file_list(self):
         """Starts the background thread to query the server."""
@@ -121,7 +157,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.statusBar().showMessage("Refreshing file list...")
         self.progress_bar.show()
-        self.refresh_button.setEnabled(False)
+        self.sync_button.setEnabled(False)
         self.refresh_thread.start()
 
     def on_refresh_finished(self, files_data):
@@ -140,14 +176,14 @@ class MainWindow(QtWidgets.QMainWindow):
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.statusBar().showMessage(f"Last updated: {now}")
         self.progress_bar.hide()
-        self.refresh_button.setEnabled(True)
+        self.sync_button.setEnabled(True)
 
     def on_refresh_error(self, error_message):
         """Handles errors reported by the background thread."""
         self.list_widget.clear()
         self.list_widget.addItem(f"Error connecting to server: {error_message}")
         self.progress_bar.hide()
-        self.refresh_button.setEnabled(True)
+        self.sync_button.setEnabled(True)
 
     def filter_file_list(self, text):
         """Filters the file list based on search text (case-insensitive)."""

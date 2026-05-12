@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, Form, HTTPException
 from fastapi.responses import FileResponse
 import uvicorn
-from database import init_db, File, FileRevision
+from database import db, init_db, File, FileRevision
 from config import DATA_PATH, BASE_PATH
 from datetime import datetime
 import xxhash
@@ -56,6 +56,60 @@ async def delete_file(relative_path: str):
     if affected == 0:
         raise HTTPException(status_code=404, detail="File not found")
     return {"relative_path": relative_path, "status": "deleted"}
+
+@app.post("/move")
+async def move_file(
+    old_path: str = Form(...),
+    new_path: str = Form(...)
+):
+    """
+    Endpoint to handle file moves. 
+    Marks the old path as deleted and creates/updates the new path with the same content.
+    """
+    if old_path == new_path:
+        return {"status": "no-op", "message": "Paths are identical"}
+
+    with db.atomic():
+        # Find all files that are either the file itself or children of the moved directory
+        targets = File.select().where(
+            (File.base_path == BASE_PATH) & 
+            (File.is_deleted == False) &
+            ((File.relative_path == old_path) | (File.relative_path.startswith(old_path + "/")))
+        )
+
+        if not targets.exists():
+            raise HTTPException(status_code=404, detail="No active files found at source path")
+
+        for old_file in targets:
+            latest = old_file.latest_revision
+            if not latest:
+                continue
+
+            # Determine the new path for this specific file
+            if old_file.relative_path == old_path:
+                target_path = new_path
+            else:
+                # Replace the old directory prefix with the new directory prefix
+                suffix = old_file.relative_path[len(old_path):]
+                target_path = new_path + suffix
+
+            old_file.is_deleted = True
+            old_file.updated_at = datetime.now()
+            old_file.save()
+
+            new_file, _ = File.get_or_create(relative_path=target_path, base_path=BASE_PATH)
+            new_file.is_deleted = False
+            new_file.updated_at = datetime.now()
+            new_file.save()
+
+            FileRevision.create(
+                file=new_file,
+                full_hash=latest.full_hash,
+                short_hash=latest.short_hash,
+                size=latest.size,
+                last_modified=latest.last_modified
+            )
+    return {"status": "moved", "from": old_path, "to": new_path}
 
 @app.post("/up")
 async def upload_file(
