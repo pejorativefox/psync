@@ -20,6 +20,8 @@ from config import BASE_PATH
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
+_keep_watching = True
+
 def generate_json_dump():
     """Generates a JSON packet of all files in the database and their latest revisions."""
     init_db()
@@ -77,7 +79,14 @@ def sync():
     # Update the last sync time in the database
     ApplicationState.replace(key='last_sync', value=datetime.now()).execute()
 
+def stop_watching():
+    """Signals the watch loop to terminate."""
+    global _keep_watching
+    _keep_watching = False
+
 def watch():
+    global _keep_watching
+    _keep_watching = True
     sync()
 
     event_handler = SyncHandler()
@@ -88,11 +97,11 @@ def watch():
     observer.start()
 
     try:
-        while True:
+        while _keep_watching:
             time.sleep(1)
-    except KeyboardInterrupt:
+    finally:
         observer.stop()
-    observer.join()
+        observer.join()
 
 def start_server():
     """Starts the FastAPI server."""

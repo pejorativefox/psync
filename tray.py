@@ -1,9 +1,12 @@
 import sys
+import os
 import signal
+import logging
 from datetime import datetime
 import requests
 from PySide6 import QtWidgets, QtGui, QtCore
 from config import SETTINGS
+from psync import watch, stop_watching
 
 class FileRefreshThread(QtCore.QThread):
     """Background thread to handle the network request for file listing."""
@@ -21,6 +24,27 @@ class FileRefreshThread(QtCore.QThread):
             self.finished.emit(response.json())
         except Exception as e:
             self.error.emit(str(e))
+
+class WatchThread(QtCore.QThread):
+    """Background thread to run the file system observer (watch)."""
+    def stop(self):
+        stop_watching()
+        self.wait()
+
+    def run(self):
+        # This will perform an initial sync and then enter the watchdog loop
+        watch()
+
+class QtLogHandler(logging.Handler, QtCore.QObject):
+    """Custom logging handler that emits a Qt signal for every log record."""
+    log_signal = QtCore.Signal(str)
+
+    def __init__(self):
+        logging.Handler.__init__(self)
+        QtCore.QObject.__init__(self)
+
+    def emit(self, record):
+        self.log_signal.emit(self.format(record))
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -59,6 +83,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.list_widget = QtWidgets.QListWidget()
         self.list_widget.itemDoubleClicked.connect(self.show_revisions)
         layout.addWidget(self.list_widget)
+
+        # Activity Log Viewer
+        layout.addWidget(QtWidgets.QLabel("Activity Log:"))
+        self.log_viewer = QtWidgets.QPlainTextEdit()
+        self.log_viewer.setReadOnly(True)
+        self.log_viewer.setMaximumHeight(100)
+        layout.addWidget(self.log_viewer)
 
         # Revisions button at the bottom
         self.revisions_button = QtWidgets.QPushButton("Revisions")
@@ -126,6 +157,11 @@ class MainWindow(QtWidgets.QMainWindow):
             # Narrow down the list by hiding items that don't match the substring
             item.setHidden(search_term not in item.text().lower())
 
+    @QtCore.Slot(str)
+    def append_log(self, message):
+        """Appends a log message to the log viewer."""
+        self.log_viewer.appendPlainText(message)
+
     def on_revisions_clicked(self):
         """Handler for the Revisions button."""
         item = self.list_widget.currentItem()
@@ -171,6 +207,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     ts,
                     f"{size_kb:.2f} KB"
                 ])
+                tree_item.setData(0, QtCore.Qt.ItemDataRole.UserRole, rev.get('full_hash'))
                 tree.addTopLevelItem(tree_item)
             
             # Auto-adjust columns to content initially
@@ -178,6 +215,36 @@ class MainWindow(QtWidgets.QMainWindow):
                 tree.resizeColumnToContents(i)
                 
             layout.addWidget(tree)
+
+            # Add download button
+            download_btn = QtWidgets.QPushButton("Download Selected Revision")
+            layout.addWidget(download_btn)
+
+            def handle_download():
+                selected = tree.currentItem()
+                if not selected:
+                    QtWidgets.QMessageBox.warning(dialog, "Selection Required", "Please select a revision to download.")
+                    return
+                
+                full_hash = selected.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                default_name = os.path.basename(rel_path)
+                
+                save_path, _ = QtWidgets.QFileDialog.getSaveFileName(dialog, "Save Revision As", default_name)
+                if not save_path:
+                    return
+
+                try:
+                    download_url = f"http://{server_host}:{server_port}/down/{full_hash}"
+                    with requests.get(download_url, stream=True, timeout=30) as r:
+                        r.raise_for_status()
+                        with open(save_path, 'wb') as f:
+                            for chunk in r.iter_content(chunk_size=8192):
+                                f.write(chunk)
+                    QtWidgets.QMessageBox.information(dialog, "Success", f"Revision saved to:\n{save_path}")
+                except Exception as ex:
+                    QtWidgets.QMessageBox.critical(dialog, "Download Error", f"Failed to download revision:\n{ex}")
+
+            download_btn.clicked.connect(handle_download)
             dialog.exec()
 
         except Exception as e:
@@ -201,9 +268,25 @@ class PsyncApp(QtWidgets.QApplication):
         self.setQuitOnLastWindowClosed(False)
         
         self.window = MainWindow()
+
+        # Configure global logging to pipe into the UI
+        self.log_handler = QtLogHandler()
+        self.log_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s', '%H:%M:%S'))
+        self.log_handler.log_signal.connect(self.window.append_log)
+        logging.getLogger().addHandler(self.log_handler)
+
         self.tray_icon = SystemTrayIcon(QtGui.QIcon(icon_path))
+
+        # Start the background file watcher
+        self.watch_thread = WatchThread()
+        self.watch_thread.start()
+        self.aboutToQuit.connect(self.on_quit)
+
         self.tray_icon.activated.connect(self.on_tray_activated)
         self.tray_icon.show()
+
+    def on_quit(self):
+        self.watch_thread.stop()
 
     def on_tray_activated(self, reason):
         if reason == QtWidgets.QSystemTrayIcon.ActivationReason.Trigger:

@@ -67,15 +67,18 @@ async def upload_file(
     Endpoint to upload new or changed files.
     Stores the file using its hash as the filename and updates the database.
     """
-    content = await file.read()
-    short_hash = xxhash.xxh32(content).hexdigest()
-    size = len(content)
-    
     # Store the file with its hash as the name
     storage_path = os.path.join(DATA_PATH, file_hash)
+    hasher32 = xxhash.xxh32()
+    size = 0
+
     if not os.path.exists(storage_path):
         with open(storage_path, "wb") as f:
-            f.write(content)
+            while chunk := await file.read(65536):
+                size += len(chunk)
+                hasher32.update(chunk)
+                f.write(chunk)
+    short_hash = hasher32.hexdigest()
             
     file_record, created = File.get_or_create(
         relative_path=relative_path,

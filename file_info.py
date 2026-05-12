@@ -11,35 +11,22 @@ from config import SETTINGS, BASE_PATH
 
 logger = logging.getLogger(__name__)
 
-def get_hash(filename):
+def get_hashes(filename):
     """
-    Generates an xxh64 hash for the given file.
+    Generates both xxh64 and xxh32 hashes for the given file in a single pass.
     
     Args:
         filename (str): The path to the file to hash.
     Returns:
-        str: The hexadecimal representation of the hash.
+        tuple: (xxh64_hex, xxh32_hex)
     """
-    hasher = xxhash.xxh64()
+    hasher64 = xxhash.xxh64()
+    hasher32 = xxhash.xxh32()
     with open(filename, "rb") as f:
         while chunk := f.read(65536):
-            hasher.update(chunk)
-    return hasher.hexdigest()
-
-def get_short_hash(filename):
-    """
-    Generates an xxh32 hash for the given file.
-    
-    Args:
-        filename (str): The path to the file to hash.
-    Returns:
-        str: The hexadecimal representation of the hash.
-    """
-    hasher = xxhash.xxh32()
-    with open(filename, "rb") as f:
-        while chunk := f.read(65536):
-            hasher.update(chunk)
-    return hasher.hexdigest()
+            hasher64.update(chunk)
+            hasher32.update(chunk)
+    return hasher64.hexdigest(), hasher32.hexdigest()
 
 def is_ignored(path: str):
     """
@@ -130,7 +117,7 @@ def process_file_change(path: str, event_type: str, source_path: str = "", skip_
         
         # Upload the file to the server
         if not skip_upload:
-            upload_to_server(path, rel_path, fi.hash)
+            upload_to_server(path, rel_path, str(fi.hash))
         
         log_msg = f"{event_type}: {rel_path}"
         if source_path:
@@ -200,14 +187,17 @@ class FileInformation(object):
     @property
     def hash(self):
         if self._hash is None:
-            self._hash = get_hash(self.file_path)
+            self._compute_hashes()
         return self._hash
     
     @property
     def short_hash(self):
         if self._short_hash is None:
-            self._short_hash = get_short_hash(self.file_path)
+            self._compute_hashes()
         return self._short_hash
+
+    def _compute_hashes(self):
+        self._hash, self._short_hash = get_hashes(self.file_path)
 
 def scan_files():
     """Scans the directory for new, modified, or deleted files and updates the database."""
@@ -318,7 +308,7 @@ def download_missing_from_server():
             needs_download = True
         else:
             # Calculate local hash to see if it matches the server
-            if get_hash(abs_path) != server_hash:
+            if get_hashes(abs_path)[0] != server_hash:
                 needs_download = True
         
         if needs_download:
