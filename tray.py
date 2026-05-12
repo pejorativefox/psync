@@ -9,10 +9,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Psync - Tracked Files")
         self.resize(600, 400)
         
-        # Replacing the static label with a QListWidget to display file status
+        # Set up menu bar
+        menubar = self.menuBar()
+        file_menu = menubar.addMenu("File")
+        exit_action = file_menu.addAction("Exit")
+        exit_action.triggered.connect(QtWidgets.QApplication.instance().quit) # pyright: ignore[reportOptionalMemberAccess]
+
+        # Set up the central layout
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(container)
+
+        # Fuzzy finder search box
+        self.search_box = QtWidgets.QLineEdit()
+        self.search_box.setPlaceholderText("Fuzzy find files...")
+        self.search_box.textChanged.connect(self.filter_file_list)
+        layout.addWidget(self.search_box)
+
+        # File list widget
         self.list_widget = QtWidgets.QListWidget()
         self.list_widget.itemDoubleClicked.connect(self.show_revisions)
-        self.setCentralWidget(self.list_widget)
+        layout.addWidget(self.list_widget)
+
+        # Revisions button at the bottom
+        self.revisions_button = QtWidgets.QPushButton("Revisions")
+        self.revisions_button.clicked.connect(self.on_revisions_clicked)
+        layout.addWidget(self.revisions_button)
+
+        self.setCentralWidget(container)
         
         self.refresh_file_list()
 
@@ -34,9 +57,28 @@ class MainWindow(QtWidgets.QMainWindow):
                 if entry.get("d"):
                     display_name += " (Deleted)"
                 self.list_widget.addItem(display_name)
+
+            # Re-apply filter if text was already present during refresh
+            self.filter_file_list(self.search_box.text())
         except Exception as e:
             self.list_widget.clear()
             self.list_widget.addItem(f"Error connecting to server: {e}")
+
+    def filter_file_list(self, text):
+        """Filters the file list based on search text (case-insensitive)."""
+        search_term = text.lower()
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            # Narrow down the list by hiding items that don't match the substring
+            item.setHidden(search_term not in item.text().lower())
+
+    def on_revisions_clicked(self):
+        """Handler for the Revisions button."""
+        item = self.list_widget.currentItem()
+        if item:
+            self.show_revisions(item)
+        else:
+            QtWidgets.QMessageBox.information(self, "Selection Required", "Please select a file from the list first.")
 
     def show_revisions(self, item):
         """Fetches and displays the revision history for a double-clicked file."""
@@ -96,7 +138,7 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
         QtWidgets.QSystemTrayIcon.__init__(self, icon, parent)
         menu = QtWidgets.QMenu(parent)
         exit_action = menu.addAction("Exit")
-        exit_action.triggered.connect(QtWidgets.QApplication.instance().quit)
+        exit_action.triggered.connect(QtWidgets.QApplication.instance().quit) # pyright: ignore[reportOptionalMemberAccess]
         self.setContextMenu(menu)
 
 class PsyncApp(QtWidgets.QApplication):

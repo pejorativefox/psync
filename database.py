@@ -2,7 +2,11 @@ import peewee
 from datetime import datetime
 
 # Database setup
-db = peewee.SqliteDatabase('psync.db')
+db = peewee.SqliteDatabase('psync.db', pragmas={
+    'journal_mode': 'wal',      # Write-Ahead Logging for much faster writes
+    'cache_size': -1 * 64000,   # 64MB cache
+    'foreign_keys': 1,
+})
 
 class BaseModel(peewee.Model):
     """A base model that will use our SQLite database."""
@@ -37,9 +41,16 @@ class File(BaseModel):
     
     @classmethod
     def get_all_files_data(cls):
+        """Returns canonical data for all files, optimized with prefetch to avoid N+1 queries."""
+        # Fetch all files and their revisions in two batch queries instead of N+1 queries
+        query = cls.select()
+        revisions = FileRevision.select().order_by(FileRevision.created_at.desc())
+        files_with_revisions = peewee.prefetch(query, revisions)
+
         files_data = []
-        for file_record in cls.select():
-            latest = file_record.latest_revision
+        for file_record in files_with_revisions:
+            # 'revisions' list is pre-populated by prefetch
+            latest = file_record.revisions[0] if file_record.revisions else None
             if latest:
                 files_data.append({
                     "f": file_record.relative_path,
@@ -57,6 +68,11 @@ class FileRevision(BaseModel):
     size = peewee.IntegerField() # Size of the file in bytes
     last_modified = peewee.DateTimeField() # Last modified timestamp from the file system
     created_at = peewee.DateTimeField(default=datetime.now) # Timestamp when this revision record was created
+
+    class Meta:
+        indexes = (
+            (('file', 'created_at'), False), # Composite index to speed up history lookups
+        )
 
 class ApplicationState(BaseModel):
     """Stores general application metadata and state."""

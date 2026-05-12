@@ -12,13 +12,11 @@ app = FastAPI()
 @app.get("/files")
 def get_files():
     """API endpoint to serve the JSON dump of all tracked files."""
-    init_db()
     return File.get_all_files_data()
 
 @app.get("/revisions/{relative_path:path}")
 def get_revisions(relative_path: str):
     """API endpoint to get the history of revisions for a specific file."""
-    init_db()
     file_record = File.get_or_none(
         (File.relative_path == relative_path) & (File.base_path == BASE_PATH)
     )
@@ -51,7 +49,6 @@ async def delete_file(relative_path: str):
     """
     Endpoint to mark a file as deleted on the server.
     """
-    init_db()
     query = File.update(is_deleted=True, updated_at=datetime.now()).where(
         (File.relative_path == relative_path) & (File.base_path == BASE_PATH)
     )
@@ -70,14 +67,9 @@ async def upload_file(
     Endpoint to upload new or changed files.
     Stores the file using its hash as the filename and updates the database.
     """
-    init_db()
-    
     content = await file.read()
     short_hash = xxhash.xxh32(content).hexdigest()
     size = len(content)
-    
-    # Ensure data directory exists
-    os.makedirs(DATA_PATH, exist_ok=True)
     
     # Store the file with its hash as the name
     storage_path = os.path.join(DATA_PATH, file_hash)
@@ -90,7 +82,10 @@ async def upload_file(
         base_path=BASE_PATH
     )
     
-    latest = file_record.latest_revision
+    # Optimization: skip the DB round-trip for latest revision if the file was just created
+    latest = None
+    if not created:
+        latest = file_record.latest_revision
     
     # Only create a new revision if the file is new, was deleted, or the content hash changed
     if created or file_record.is_deleted or not latest or latest.full_hash != file_hash:
@@ -111,4 +106,6 @@ async def upload_file(
 def run_server(host: str = "0.0.0.0", port: int = 8000):
     """Starts the FastAPI server using uvicorn."""
     init_db()
+    # Ensure data directory exists once at startup
+    os.makedirs(DATA_PATH, exist_ok=True)
     uvicorn.run(app, host=host, port=port)
