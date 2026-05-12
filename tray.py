@@ -7,6 +7,7 @@ import requests
 from PySide6 import QtWidgets, QtGui, QtCore
 from config import SETTINGS
 from psync import sync as run_psync, watch, stop_watching
+from assets import get_asset_path
 
 class SyncWorkerThread(QtCore.QThread):
     """Background thread to run the full synchronization logic."""
@@ -339,4 +340,4 @@ def main(image):
     sys.exit(app.exec())
 
 if __name__ == '__main__':
-    main('assets/idle.png')
+    main(get_asset_path('assets/idle.png'))

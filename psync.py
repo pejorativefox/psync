@@ -16,6 +16,9 @@ from server import run_server
 from file_info import process_file_change, scan_files, upload_missing_to_server, download_missing_from_server, handle_deletion, handle_move
 from database import File, ApplicationState, init_db, close_db
 from config import BASE_PATH
+from assets import get_asset_path
+
+# Configure logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
 logger = logging.getLogger(__name__)
@@ -120,7 +123,7 @@ if __name__ == "__main__":
         watch()
     elif args.gui:
         from tray import main as run_gui
-        run_gui('assets/idle.png')
+        run_gui(get_asset_path('assets/idle.png'))
     elif args.server:
         start_server()
     elif args.sync:
@@ -140,6 +143,6 @@ if __name__ == "__main__":
         print(json_output)
     else:
         from tray import main as run_gui
-        run_gui('assets/idle.png')
+        run_gui(get_asset_path('assets/idle.png'))
     
     close_db()
