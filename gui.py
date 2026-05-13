@@ -402,6 +402,9 @@ class PsyncApp(QtWidgets.QApplication):
         self.config = config
         self.setQuitOnLastWindowClosed(False)
         
+        # Set the application icon
+        self.setWindowIcon(QtGui.QIcon(icon_path))
+        
         self.window = MainWindow(config)
 
         # Configure global logging to pipe into the UI
