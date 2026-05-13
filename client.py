@@ -28,7 +28,7 @@ class ServerClient:
         with open(path, "rb") as f:
             files = {"file": (os.path.basename(path), f)}
             data = {"relative_path": rel_path, "file_hash": file_hash}
-            self._make_request("POST", "/up", files=files, data=data)
+            self._make_request("POST", "/up", files=files, data=data, timeout=(10, 3600))
         logger.info(f"Uploaded {rel_path} to server.")
 
     def delete_file(self, rel_path: str):
