@@ -1,15 +1,11 @@
 import peewee
 from datetime import datetime
 import os
+from pathlib import Path
+from platformdirs import user_data_dir
 
 # Database setup
-db_path = os.environ.get("DATABASE_PATH", "psync.db")
-
-db = peewee.SqliteDatabase(db_path, pragmas={
-    'journal_mode': 'wal',      # Write-Ahead Logging for much faster writes
-    'cache_size': -1 * 64000,   # 64MB cache
-    'foreign_keys': 1,
-})
+db = peewee.Proxy()
 
 class BaseModel(peewee.Model):
     """A base model that will use our SQLite database."""
@@ -67,7 +63,6 @@ class FileRevision(BaseModel):
     """Represents a specific version or revision of a File."""
     file = peewee.ForeignKeyField(File, backref='revisions')
     full_hash = peewee.CharField() # Stores the xxh64 hash
-    short_hash = peewee.CharField() # Stores the xxh32 hash
     size = peewee.IntegerField() # Size of the file in bytes
     last_modified = peewee.DateTimeField() # Last modified timestamp from the file system
     created_at = peewee.DateTimeField(default=datetime.now) # Timestamp when this revision record was created
@@ -82,11 +77,25 @@ class ApplicationState(BaseModel):
     key = peewee.CharField(unique=True)
     value = peewee.DateTimeField()
 
-def init_db():
+def init_db(db_path=None):
     """Initializes the database connection and ensures tables are created."""
-    db_dir = os.path.dirname(db_path)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
+    if db_path is None:
+        db_path = os.environ.get("DATABASE_PATH")
+        if not db_path:
+            db_path = Path(user_data_dir("psync")) / "psync.db"
+        
+    # Initialize the proxy if it hasn't been already
+    if db.obj is None:
+        db_dir = os.path.dirname(os.path.abspath(db_path))
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+            
+        db.initialize(peewee.SqliteDatabase(db_path, pragmas={
+            'journal_mode': 'wal',
+            'cache_size': -1 * 64000,
+            'foreign_keys': 1,
+        }))
+
     db.connect(reuse_if_open=True)
     db.create_tables([File, FileRevision, ApplicationState])
 

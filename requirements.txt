@@ -10,6 +10,7 @@ h11==0.16.0
 idna==3.14
 packaging==26.2
 peewee==4.0.5
+platformdirs==4.9.6
 pydantic==2.13.4
 pydantic_core==2.46.4
 pyinstaller==6.20.0

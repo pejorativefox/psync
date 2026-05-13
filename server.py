@@ -2,18 +2,27 @@ from fastapi import FastAPI, UploadFile, Form, HTTPException
 from fastapi.responses import FileResponse
 import uvicorn
 from database import db, init_db, File, FileRevision
-from config import DATA_PATH, BASE_PATH
 from datetime import datetime
 import xxhash
 import os
+from pathlib import Path
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+# Server Configuration (Environment Variables Only)
+DATA_PATH = str(Path(os.getenv("DATA_PATH", "data")).expanduser().resolve())
+BASE_PATH = str(Path(os.getenv("BASE_PATH", ".")).expanduser().resolve())
+SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
+SERVER_PORT = int(os.getenv("SERVER_PORT", 8000))
+DATABASE_PATH = os.getenv("DATABASE_PATH", "psync.db")
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     """Initializes the database and ensures the data directory exists on startup."""
-    init_db()
+    init_db(DATABASE_PATH)
     os.makedirs(DATA_PATH, exist_ok=True)
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/files")
 def get_files():
@@ -32,7 +41,6 @@ def get_revisions(relative_path: str):
     return [
         {
             "full_hash": rev.full_hash,
-            "short_hash": rev.short_hash,
             "size": rev.size,
             "last_modified": rev.last_modified.isoformat(),
             "created_at": rev.created_at.isoformat(),
@@ -111,14 +119,13 @@ async def move_file(
             FileRevision.create(
                 file=new_file,
                 full_hash=latest.full_hash,
-                short_hash=latest.short_hash,
                 size=latest.size,
                 last_modified=latest.last_modified
             )
     return {"status": "moved", "from": old_path, "to": new_path}
 
 @app.post("/up")
-async def upload_file(
+def upload_file(
     file: UploadFile,
     relative_path: str = Form(...),
     file_hash: str = Form(...)
@@ -129,16 +136,13 @@ async def upload_file(
     """
     # Store the file with its hash as the name
     storage_path = os.path.join(DATA_PATH, file_hash)
-    hasher32 = xxhash.xxh32()
     size = 0
 
     if not os.path.exists(storage_path):
         with open(storage_path, "wb") as f:
-            while chunk := await file.read(65536):
+            while chunk := file.file.read(65536):
                 size += len(chunk)
-                hasher32.update(chunk)
                 f.write(chunk)
-    short_hash = hasher32.hexdigest()
             
     file_record, created = File.get_or_create(
         relative_path=relative_path,
@@ -159,13 +163,12 @@ async def upload_file(
         FileRevision.create(
             file=file_record,
             full_hash=file_hash,
-            short_hash=short_hash,
             size=size,
             last_modified=datetime.now()
         )
         
     return {"relative_path": relative_path, "hash": file_hash, "status": "processed"}
 
-def run_server(host: str = "0.0.0.0", port: int = 8000):
+def run_server(host: str = SERVER_HOST, port: int = SERVER_PORT):
     """Starts the FastAPI server using uvicorn."""
     uvicorn.run(app, host=host, port=port)

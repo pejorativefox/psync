@@ -3,20 +3,78 @@ import os
 import signal
 import logging
 from datetime import datetime
-import requests
+from database import init_db
 from PySide6 import QtWidgets, QtGui, QtCore
-from config import SETTINGS
-from psync import sync as run_psync, watch, stop_watching
-from assets import get_asset_path
+from watch import watch, stop_watching
+from sync import sync as run_psync
+from client import ServerClient
+
+def get_asset_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    # PyInstaller extracts assets to a temporary folder stored in sys._MEIPASS
+    base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
+
+class ConfigWizard(QtWidgets.QDialog):
+    """Dialog to configure initial Psync settings."""
+    def __init__(self, config, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.setWindowTitle("Psync Configuration Wizard")
+        self.setMinimumWidth(450)
+        
+        layout = QtWidgets.QFormLayout(self)
+        
+        self.path_edit = QtWidgets.QLineEdit(config.base_path)
+        self.browse_btn = QtWidgets.QPushButton("Browse...")
+        self.browse_btn.clicked.connect(self.on_browse)
+        
+        path_layout = QtWidgets.QHBoxLayout()
+        path_layout.addWidget(self.path_edit)
+        path_layout.addWidget(self.browse_btn)
+        layout.addRow("Local Sync Folder:", path_layout)
+        
+        self.host_edit = QtWidgets.QLineEdit(config.server_hostname)
+        layout.addRow("Server Hostname:", self.host_edit)
+        
+        self.port_edit = QtWidgets.QLineEdit(str(config.server_port))
+        self.port_edit.setValidator(QtGui.QIntValidator(1, 65535))
+        layout.addRow("Server Port:", self.port_edit)
+        
+        self.buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Save | 
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        self.buttons.accepted.connect(self.on_save)
+        self.buttons.rejected.connect(self.reject)
+        layout.addRow(self.buttons)
+
+    def on_browse(self):
+        directory = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Sync Directory", self.path_edit.text())
+        if directory:
+            self.path_edit.setText(directory)
+
+    def on_save(self):
+        path = self.path_edit.text().strip()
+        if not path or not os.path.isdir(path):
+            QtWidgets.QMessageBox.warning(self, "Invalid Path", "Please select a valid local directory.")
+            return
+            
+        self.config.save_settings(path, self.host_edit.text().strip(), self.port_edit.text().strip())
+        self.accept()
 
 class SyncWorkerThread(QtCore.QThread):
     """Background thread to run the full synchronization logic."""
     finished = QtCore.Signal()
     error = QtCore.Signal(str)
 
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
     def run(self):
         try:
-            run_psync()
+            run_psync(self.config)
             self.finished.emit()
         except Exception as e:
             self.error.emit(str(e))
@@ -26,27 +84,30 @@ class FileRefreshThread(QtCore.QThread):
     finished = QtCore.Signal(list)
     error = QtCore.Signal(str)
 
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
     def run(self):
         try:
-            server_host = SETTINGS.get("core", {}).get("server_hostname", "127.0.0.1")
-            server_port = SETTINGS.get("core", {}).get("server_port", 8000)
-            url = f"http://{server_host}:{server_port}/files"
-            
-            response = requests.get(url, timeout=5)
-            response.raise_for_status()
-            self.finished.emit(response.json())
+            client = ServerClient(self.config)
+            self.finished.emit(client.get_server_files())
         except Exception as e:
             self.error.emit(str(e))
 
 class WatchThread(QtCore.QThread):
     """Background thread to run the file system observer (watch)."""
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
     def stop(self):
         stop_watching()
         self.wait()
 
     def run(self):
         # This will perform an initial sync and then enter the watchdog loop
-        watch()
+        watch(self.config)
 
 class QtLogHandler(logging.Handler, QtCore.QObject):
     """Custom logging handler that emits a Qt signal for every log record."""
@@ -60,14 +121,20 @@ class QtLogHandler(logging.Handler, QtCore.QObject):
         self.log_signal.emit(self.format(record))
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
+        self.config = config
         self.setWindowTitle("Psync - Tracked Files")
-        self.resize(600, 400)
+
+        # Set window height to 80% of the available screen height
+        screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        self.resize(600, int(screen.height() * 0.8))
         
         # Set up menu bar
         menubar = self.menuBar()
         file_menu = menubar.addMenu("&File")
+        settings_action = file_menu.addAction("&Settings...")
+        settings_action.triggered.connect(self.open_config_wizard)
         exit_action = file_menu.addAction("E&xit")
         exit_action.triggered.connect(QtWidgets.QApplication.instance().quit) # pyright: ignore[reportOptionalMemberAccess]
 
@@ -118,19 +185,59 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress_bar.hide()
         self.statusBar().addPermanentWidget(self.progress_bar)
 
+        # Initialize the server client
+        self.client = ServerClient(self.config)
+
         # Set up the background refresh thread
-        self.refresh_thread = FileRefreshThread()
+        self.refresh_thread = FileRefreshThread(self.config)
         self.refresh_thread.finished.connect(self.on_refresh_finished)
         self.refresh_thread.error.connect(self.on_refresh_error)
 
         # Set up the background sync thread
-        self.sync_worker = SyncWorkerThread()
+        self.sync_worker = SyncWorkerThread(self.config)
         self.sync_worker.finished.connect(self.on_sync_finished)
         self.sync_worker.error.connect(self.on_sync_error)
 
         self.setCentralWidget(container)
         
-        self.refresh_file_list()
+        # Delay check to allow UI to render
+        QtCore.QTimer.singleShot(0, self.initial_setup_check)
+
+    def initial_setup_check(self):
+        """Checks if the configuration is valid; shows wizard if not."""
+        if self.check_config():
+            self.refresh_file_list()
+
+    def check_config(self):
+        """
+        Validates the current configuration. 
+        Returns True if valid, or shows Wizard. Returns False if user cancels.
+        """
+        if self.config.is_new or not os.path.isdir(self.config.base_path):
+            wizard = ConfigWizard(self.config, self)
+            if wizard.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                # Successfully configured, notify app to start watching
+                q_app = QtWidgets.QApplication.instance()
+                if hasattr(q_app, 'start_watching'):
+                    q_app.start_watching() # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
+                return True
+            else:
+                # User aborted setup
+                QtWidgets.QApplication.instance().quit() # pyright: ignore[reportOptionalMemberAccess]
+                return False
+        return True
+
+    def open_config_wizard(self):
+        """Opens the configuration wizard manually."""
+        wizard = ConfigWizard(self.config, self)
+        if wizard.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            # Re-initialize the client with new config details
+            self.client = ServerClient(self.config)
+            # Notify app to start/update watching
+            q_app = QtWidgets.QApplication.instance()
+            if hasattr(q_app, 'start_watching'):
+                q_app.start_watching() # pyright: ignore[reportOptionalMemberAccess, reportAttributeAccessIssue]
+            self.refresh_file_list()
 
     def start_sync(self):
         """Starts the full synchronization process."""
@@ -168,7 +275,9 @@ class MainWindow(QtWidgets.QMainWindow):
             display_name = entry.get("f", "Unknown")
             if entry.get("d"):
                 display_name += " (Deleted)"
-            self.list_widget.addItem(display_name)
+            item = QtWidgets.QListWidgetItem(display_name)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, entry.get("f"))
+            self.list_widget.addItem(item)
 
         # Re-apply filter if text was already present during refresh
         self.filter_file_list(self.search_box.text())
@@ -209,17 +318,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def show_revisions(self, item):
         """Fetches and displays the revision history for a double-clicked file."""
-        # Extract the relative path by stripping the status suffix
-        rel_path = item.text().split(" (")[0]
+        rel_path = item.data(QtCore.Qt.ItemDataRole.UserRole)
         
-        server_host = SETTINGS.get("core", {}).get("server_hostname", "127.0.0.1")
-        server_port = SETTINGS.get("core", {}).get("server_port", 8000)
-        url = f"http://{server_host}:{server_port}/revisions/{rel_path}"
-
         try:
-            response = requests.get(url, timeout=5)
-            response.raise_for_status()
-            revisions = response.json()
+            revisions = self.client.get_revisions(rel_path)
 
             # Create a popup dialog
             dialog = QtWidgets.QDialog(self)
@@ -240,7 +342,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 size_kb = rev.get("size", 0) / 1024
                 
                 tree_item = QtWidgets.QTreeWidgetItem([
-                    rev.get('short_hash', 'N/A'),
+                    rev.get('full_hash', 'N/A'),
                     ts,
                     f"{size_kb:.2f} KB"
                 ])
@@ -271,12 +373,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     return
 
                 try:
-                    download_url = f"http://{server_host}:{server_port}/down/{full_hash}"
-                    with requests.get(download_url, stream=True, timeout=30) as r:
-                        r.raise_for_status()
-                        with open(save_path, 'wb') as f:
-                            for chunk in r.iter_content(chunk_size=8192):
-                                f.write(chunk)
+                    self.client.download_file(full_hash, save_path)
                     QtWidgets.QMessageBox.information(dialog, "Success", f"Revision saved to:\n{save_path}")
                 except Exception as ex:
                     QtWidgets.QMessageBox.critical(dialog, "Download Error", f"Failed to download revision:\n{ex}")
@@ -300,11 +397,12 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
         self.setContextMenu(menu)
 
 class PsyncApp(QtWidgets.QApplication):
-    def __init__(self, args, icon_path):
+    def __init__(self, args, icon_path, config):
         super().__init__(args)
+        self.config = config
         self.setQuitOnLastWindowClosed(False)
         
-        self.window = MainWindow()
+        self.window = MainWindow(config)
 
         # Configure global logging to pipe into the UI
         self.log_handler = QtLogHandler()
@@ -315,15 +413,32 @@ class PsyncApp(QtWidgets.QApplication):
         self.tray_icon = SystemTrayIcon(QtGui.QIcon(icon_path))
 
         # Start the background file watcher
-        self.watch_thread = WatchThread()
-        self.watch_thread.start()
+        self.watch_thread = None
+        self._last_started_path = None
+        if not config.is_new and os.path.isdir(config.base_path):
+            self.start_watching()
+
         self.aboutToQuit.connect(self.on_quit)
 
         self.tray_icon.activated.connect(self.on_tray_activated)
         self.tray_icon.show()
 
+    def start_watching(self):
+        new_path = self.config.base_path
+        
+        if self.watch_thread and self._last_started_path != new_path:
+            logging.info(f"Restarting watch thread: path changed from {self._last_started_path} to {new_path}")
+            self.watch_thread.stop()
+            self.watch_thread = None
+
+        if not self.watch_thread and os.path.isdir(new_path):
+            self._last_started_path = new_path
+            self.watch_thread = WatchThread(self.config)
+            self.watch_thread.start()
+
     def on_quit(self):
-        self.watch_thread.stop()
+        if self.watch_thread:
+            self.watch_thread.stop()
 
     def on_tray_activated(self, reason):
         if reason == QtWidgets.QSystemTrayIcon.ActivationReason.Trigger:
@@ -333,11 +448,15 @@ class PsyncApp(QtWidgets.QApplication):
                 self.window.show()
                 self.window.activateWindow()
 
-def main(image):
+def main(config, image=None):
+    if image is None:
+        image = get_asset_path('assets/idle.png')
     # Allow the application to be terminated with Ctrl+C in the terminal
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    app = PsyncApp(sys.argv, image)
+    init_db()
+    app = PsyncApp(sys.argv, image, config)
     sys.exit(app.exec())
 
 if __name__ == '__main__':
-    main(get_asset_path('assets/idle.png'))
+    from config import Config
+    main(Config())
