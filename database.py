@@ -1,6 +1,8 @@
 import peewee
 from datetime import datetime
 import os
+from pathlib import Path
+from platformdirs import user_data_dir
 
 # Database setup
 db = peewee.Proxy()
@@ -78,7 +80,9 @@ class ApplicationState(BaseModel):
 def init_db(db_path=None):
     """Initializes the database connection and ensures tables are created."""
     if db_path is None:
-        db_path = os.environ.get("DATABASE_PATH", "psync.db")
+        db_path = os.environ.get("DATABASE_PATH")
+        if not db_path:
+            db_path = Path(user_data_dir("psync")) / "psync.db"
         
     # Initialize the proxy if it hasn't been already
     if db.obj is None:

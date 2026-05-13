@@ -47,6 +47,11 @@ class ServerClient:
         response = self._make_request("GET", "/files")
         return response.json()
 
+    def get_revisions(self, rel_path: str):
+        """Fetches the revision history for a specific file."""
+        response = self._make_request("GET", f"/revisions/{rel_path}")
+        return response.json()
+
     def download_file(self, file_hash: str, local_path: str):
         """Downloads a file from the server by its hash."""
         url = f"{self.base_url}/down/{file_hash}" # Direct URL for streaming

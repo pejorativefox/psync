@@ -7,7 +7,7 @@ WORKDIR /app
 RUN apk add --no-cache build-base
 
 # Install Python dependencies required by the server.
-RUN pip install --no-cache-dir peewee fastapi uvicorn xxhash requests python-multipart
+RUN pip install --no-cache-dir peewee fastapi uvicorn xxhash requests python-multipart platformdirs
 
 # Copy only the necessary files for the server
 # These files are required for the FastAPI server to run.

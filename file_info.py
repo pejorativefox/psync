@@ -4,9 +4,9 @@ from datetime import datetime
 import logging
 import fnmatch
 import os
-import requests
 
 from database import db, File, FileRevision
+from client import ServerClient
 
 logger = logging.getLogger(__name__)
 
@@ -58,16 +58,11 @@ def upload_to_server(path: str, rel_path: str, file_hash: str, config):
     """
     Sends a POST request to the server's /up endpoint to upload a file.
     """
-    url = f"http://{config.server_hostname}:{config.server_port}/up"
-
+    client = ServerClient(config)
     try:
-        with open(path, "rb") as f:
-            files = {"file": (os.path.basename(path), f)}
-            data = {"relative_path": rel_path, "file_hash": file_hash}
-            response = requests.post(url, files=files, data=data)
-            response.raise_for_status()
-    except Exception as e:
-        logger.error(f"Failed to upload {rel_path} to server: {e}")
+        client.upload_file(path, rel_path, file_hash)
+    except Exception:
+        pass
 
 def process_file_change(path: str, event_type: str, config, source_path: str = "", skip_upload: bool = False):
     """
@@ -183,27 +178,23 @@ def handle_move(src_path: str, dest_path: str, config):
 
     if success:
         # Notify server of the move
-        url = f"http://{config.server_hostname}:{config.server_port}/move"
+        client = ServerClient(config)
         try:
-            response = requests.post(url, data={"old_path": rel_src, "new_path": rel_dst}, timeout=10)
-            response.raise_for_status()
-            logger.info(f"Moved: {rel_src} -> {rel_dst}")
+            client.move_file(rel_src, rel_dst)
             return
-        except Exception as e:
-            logger.error(f"Failed to notify server of move: {e}")
+        except Exception:
+            pass
     
     # Fallback to standard change processing (hash + upload) if optimized move fails
     process_file_change(dest_path, "Moved", config, source_path=src_path)
 
 def delete_from_server(rel_path: str, config):
     """Sends a DELETE request to the server to mark a file as deleted."""
-    url = f"http://{config.server_hostname}:{config.server_port}/files/{rel_path}"
-
+    client = ServerClient(config)
     try:
-        response = requests.delete(url, timeout=10)
-        response.raise_for_status()
-    except Exception as e:
-        logger.error(f"Failed to notify server of deletion for {rel_path}: {e}")
+        client.delete_file(rel_path)
+    except Exception:
+        pass
 
 def handle_deletion(path: str, config):
     """Marks a file as deleted locally and notifies the server."""
@@ -284,14 +275,10 @@ def scan_files(config):
 
 def get_server_files(config):
     """Fetches the list of files currently known by the server."""
-    url = f"http://{config.server_hostname}:{config.server_port}/files"
-
+    client = ServerClient(config)
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        logger.error(f"Failed to retrieve file list from server: {e}")
+        return client.get_server_files()
+    except Exception:
         return []
 
 def upload_missing_to_server(config):
@@ -328,19 +315,10 @@ def upload_missing_to_server(config):
 
 def download_file_from_server(file_hash: str, local_path: str, config):
     """Downloads a file from the server by its hash."""
-    url = f"http://{config.server_hostname}:{config.server_port}/down/{file_hash}"
-
+    client = ServerClient(config)
     try:
-        response = requests.get(url, stream=True, timeout=30)
-        response.raise_for_status()
-        
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        with open(local_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        return True
-    except Exception as e:
-        logger.error(f"Failed to download hash {file_hash} to {local_path}: {e}")
+        return client.download_file(file_hash, local_path)
+    except Exception:
         return False
 
 def download_missing_from_server(config):

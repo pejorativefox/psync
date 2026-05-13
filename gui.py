@@ -3,11 +3,11 @@ import os
 import signal
 import logging
 from datetime import datetime
-import requests
 from database import init_db
 from PySide6 import QtWidgets, QtGui, QtCore
 from watch import watch, stop_watching
 from sync import sync as run_psync
+from client import ServerClient
 
 def get_asset_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -42,10 +42,8 @@ class FileRefreshThread(QtCore.QThread):
 
     def run(self):
         try:
-            url = f"http://{self.config.server_hostname}:{self.config.server_port}/files"
-            response = requests.get(url, timeout=5)
-            response.raise_for_status()
-            self.finished.emit(response.json())
+            client = ServerClient(self.config)
+            self.finished.emit(client.get_server_files())
         except Exception as e:
             self.error.emit(str(e))
 
@@ -133,6 +131,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress_bar.setTextVisible(False)
         self.progress_bar.hide()
         self.statusBar().addPermanentWidget(self.progress_bar)
+
+        # Initialize the server client
+        self.client = ServerClient(self.config)
 
         # Set up the background refresh thread
         self.refresh_thread = FileRefreshThread(self.config)
@@ -229,10 +230,7 @@ class MainWindow(QtWidgets.QMainWindow):
         rel_path = item.text().split(" (")[0]
         
         try:
-            url = f"http://{self.config.server_hostname}:{self.config.server_port}/revisions/{rel_path}"
-            response = requests.get(url, timeout=5)
-            response.raise_for_status()
-            revisions = response.json()
+            revisions = self.client.get_revisions(rel_path)
 
             # Create a popup dialog
             dialog = QtWidgets.QDialog(self)
@@ -284,12 +282,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     return
 
                 try:
-                    download_url = f"http://{self.config.server_hostname}:{self.config.server_port}/down/{full_hash}"
-                    with requests.get(download_url, stream=True, timeout=30) as r:
-                        r.raise_for_status()
-                        with open(save_path, 'wb') as f:
-                            for chunk in r.iter_content(chunk_size=8192):
-                                f.write(chunk)
+                    self.client.download_file(full_hash, save_path)
                     QtWidgets.QMessageBox.information(dialog, "Success", f"Revision saved to:\n{save_path}")
                 except Exception as ex:
                     QtWidgets.QMessageBox.critical(dialog, "Download Error", f"Failed to download revision:\n{ex}")
