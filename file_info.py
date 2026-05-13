@@ -36,6 +36,9 @@ def is_ignored(path: str, config, rel_path: str = None): # pyright: ignore[repor
     Returns:
         bool: True if the path should be ignored, False otherwise.
     """
+    if path.endswith('.psync_tmp') or (rel_path and rel_path.endswith('.psync_tmp')):
+        return True
+
     ignore_patterns = config.ignore_patterns
     if not ignore_patterns:
         return False
@@ -378,9 +381,16 @@ def download_missing_from_server(config):
 
             if needs_download:
                 logger.info(f"Downloading missing/mismatched file from server: {rel_path}")
-                if download_file_from_server(server_hash, abs_path, config):
-                    process_file_change(abs_path, "Downloaded", config, skip_upload=True)
-                    downloaded_count += 1
+                temp_path = abs_path + ".psync_tmp"
+                if download_file_from_server(server_hash, temp_path, config):
+                    try:
+                        os.replace(temp_path, abs_path)
+                        process_file_change(abs_path, "Downloaded", config, skip_upload=True)
+                        downloaded_count += 1
+                    except Exception as e:
+                        logger.error(f"Failed to finalize download for {rel_path}: {e}")
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
 
     if downloaded_count == 0 and deleted_count == 0:
         logger.info("Local storage is already up to date with server.")
