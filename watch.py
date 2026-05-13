@@ -47,9 +47,16 @@ def watch(config):
     logger.info(f"Starting watch mode on: {config.base_path}")
     observer.start()
 
+    last_remote_sync = time.time()
+
     try:
         while _keep_watching:
             time.sleep(1)
+            
+            # Periodically check for remote changes without doing a full local scan
+            if time.time() - last_remote_sync >= config.remote_sync_interval:
+                sync(config, pull_only=True)
+                last_remote_sync = time.time()
     finally:
         observer.stop()
         observer.join()

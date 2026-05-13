@@ -327,14 +327,29 @@ def download_missing_from_server(config):
     server_files = get_server_files(config)
     
     downloaded_count = 0
+    deleted_count = 0
     for s_file in server_files:
-        if s_file.get('d', False):
-            continue
-            
         rel_path = s_file['f']
-        server_hash = s_file['h']
         abs_path = os.path.join(config.base_path, rel_path)
         
+        if s_file.get('d', False):
+            # Handle file deleted on server
+            if os.path.exists(abs_path) and os.path.isfile(abs_path):
+                logger.info(f"Removing file deleted on server: {rel_path}")
+                try:
+                    os.remove(abs_path)
+                except Exception as e:
+                    logger.error(f"Failed to delete local file {rel_path}: {e}")
+            
+            # Ensure local DB reflects the deletion
+            affected = File.update(is_deleted=True, updated_at=datetime.now()).where(
+                (File.relative_path == rel_path) & (File.base_path == config.base_path) & (File.is_deleted == False)
+            ).execute()
+            if affected > 0:
+                deleted_count += 1
+            continue
+            
+        server_hash = s_file['h']
         needs_download = False
         if not os.path.exists(abs_path):
             needs_download = True
@@ -349,7 +364,7 @@ def download_missing_from_server(config):
                 process_file_change(abs_path, "Downloaded", config, skip_upload=True)
                 downloaded_count += 1
 
-    if downloaded_count == 0:
+    if downloaded_count == 0 and deleted_count == 0:
         logger.info("Local storage is already up to date with server.")
     else:
-        logger.info(f"Download reconciliation complete. {downloaded_count} files downloaded.")
+        logger.info(f"Download reconciliation complete. {downloaded_count} files downloaded, {deleted_count} files removed.")

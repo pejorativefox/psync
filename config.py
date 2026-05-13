@@ -14,6 +14,7 @@ class Config:
         self.ignore_patterns = self.settings.get("core", {}).get("ignore", [])
         self.server_hostname = self.settings.get("core", {}).get("server_hostname", "127.0.0.1")
         self.server_port = self.settings.get("core", {}).get("server_port", 8000)
+        self.remote_sync_interval = self.settings.get("core", {}).get("remote_sync_interval", 60)
 
     def _load_settings(self, settings_path):
         """Internal function to load settings from the local TOML file."""
@@ -27,6 +28,7 @@ class Config:
                 'server_hostname = "127.0.0.1"\n'
                 'server_port = 8000\n'
                 'ignore = [".git/", "__pycache__/", "*.pyc", ".DS_Store"]\n'
+                'remote_sync_interval = 60\n'
             )
             path.write_text(default_config)
         with open(path, "rb") as f:
