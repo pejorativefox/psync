@@ -351,19 +351,24 @@ def download_missing_from_server(config):
 
             # Fetch local record to check for resurrection or deletion race conditions
             file_record = File.get_or_none(File.relative_path == rel_path)
+            latest = file_record.latest_revision if file_record else None
 
             if not os.path.exists(abs_path):
                 if file_record and file_record.is_deleted:
                     # If deleted locally, only download if server version is different/newer
-                    latest = file_record.latest_revision
                     if not latest or latest.full_hash != server_hash:
                         needs_download = True
                 else:
                     # File is missing and not intentionally deleted locally
                     needs_download = True
-            elif get_hash(abs_path) != server_hash:
-                # File exists on disk, check if content matches server
-                needs_download = True
+            else:
+                local_hash = get_hash(abs_path)
+                if local_hash != server_hash:
+                    # Conflict detection: skip download if local file has un-synced changes
+                    if latest and local_hash != latest.full_hash:
+                        logger.warning(f"Conflict: {rel_path} was modified locally. Skipping download to prevent data loss.")
+                        continue
+                    needs_download = True
 
             if needs_download:
                 logger.info(f"Downloading missing/mismatched file from server: {rel_path}")

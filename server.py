@@ -6,6 +6,7 @@ from datetime import datetime
 import anyio
 import xxhash
 import os
+import tempfile
 from pathlib import Path
 
 # Server Configuration (Environment Variables Only)
@@ -146,12 +147,18 @@ async def upload_file(
     size = 0
 
     if not os.path.exists(storage_path):
-        # Use anyio to handle file writing without blocking the event loop
-        path = anyio.Path(storage_path)
-        async with await path.open("wb") as f:
-            while chunk := await file.read(65536):
-                size += len(chunk)
-                await f.write(chunk)
+        # Atomic write using a temporary file to prevent race conditions or partial writes
+        fd, temp_path = tempfile.mkstemp(dir=DATA_PATH)
+        try:
+            with os.fdopen(fd, 'wb') as f:
+                while chunk := await file.read(65536):
+                    size += len(chunk)
+                    f.write(chunk)
+            os.replace(temp_path, storage_path)
+        except Exception:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
             
     file_record, created = File.get_or_create(relative_path=relative_path)
     
