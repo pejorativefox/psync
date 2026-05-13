@@ -6,6 +6,7 @@ from datetime import datetime
 import xxhash
 import os
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 # Server Configuration (Environment Variables Only)
 DATA_PATH = str(Path(os.getenv("DATA_PATH", "data")).expanduser().resolve())
@@ -14,13 +15,14 @@ SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
 SERVER_PORT = int(os.getenv("SERVER_PORT", 8000))
 DATABASE_PATH = os.getenv("DATABASE_PATH", "psync.db")
 
-app = FastAPI()
-
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     """Initializes the database and ensures the data directory exists on startup."""
     init_db(DATABASE_PATH)
     os.makedirs(DATA_PATH, exist_ok=True)
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/files")
 def get_files():
@@ -123,7 +125,7 @@ async def move_file(
     return {"status": "moved", "from": old_path, "to": new_path}
 
 @app.post("/up")
-async def upload_file(
+def upload_file(
     file: UploadFile,
     relative_path: str = Form(...),
     file_hash: str = Form(...)
@@ -138,7 +140,7 @@ async def upload_file(
 
     if not os.path.exists(storage_path):
         with open(storage_path, "wb") as f:
-            while chunk := await file.read(65536):
+            while chunk := file.file.read(65536):
                 size += len(chunk)
                 f.write(chunk)
             

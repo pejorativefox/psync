@@ -125,7 +125,10 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.config = config
         self.setWindowTitle("Psync - Tracked Files")
-        self.resize(600, 400)
+
+        # Set window height to 80% of the available screen height
+        screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        self.resize(600, int(screen.height() * 0.8))
         
         # Set up menu bar
         menubar = self.menuBar()
@@ -272,7 +275,9 @@ class MainWindow(QtWidgets.QMainWindow):
             display_name = entry.get("f", "Unknown")
             if entry.get("d"):
                 display_name += " (Deleted)"
-            self.list_widget.addItem(display_name)
+            item = QtWidgets.QListWidgetItem(display_name)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, entry.get("f"))
+            self.list_widget.addItem(item)
 
         # Re-apply filter if text was already present during refresh
         self.filter_file_list(self.search_box.text())
@@ -313,8 +318,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def show_revisions(self, item):
         """Fetches and displays the revision history for a double-clicked file."""
-        # Extract the relative path by stripping the status suffix
-        rel_path = item.text().split(" (")[0]
+        rel_path = item.data(QtCore.Qt.ItemDataRole.UserRole)
         
         try:
             revisions = self.client.get_revisions(rel_path)

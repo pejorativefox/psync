@@ -61,8 +61,8 @@ def upload_to_server(path: str, rel_path: str, file_hash: str, config):
     client = ServerClient(config)
     try:
         client.upload_file(path, rel_path, file_hash)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Failed to upload {rel_path}: {e}")
 
 def process_file_change(path: str, event_type: str, config, source_path: str = "", skip_upload: bool = False):
     """
@@ -182,8 +182,8 @@ def handle_move(src_path: str, dest_path: str, config):
         try:
             client.move_file(rel_src, rel_dst)
             return
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to notify server of move from {rel_src}: {e}")
     
     # Fallback to standard change processing (hash + upload) if optimized move fails
     process_file_change(dest_path, "Moved", config, source_path=src_path)
@@ -193,8 +193,8 @@ def delete_from_server(rel_path: str, config):
     client = ServerClient(config)
     try:
         client.delete_file(rel_path)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Failed to notify server of deletion for {rel_path}: {e}")
 
 def handle_deletion(path: str, config):
     """Marks a file as deleted locally and notifies the server."""
