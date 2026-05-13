@@ -6,7 +6,8 @@ from datetime import datetime
 import requests
 from PySide6 import QtWidgets, QtGui, QtCore
 from config import SETTINGS
-from psync import sync as run_psync, watch, stop_watching
+from watch import watch, stop_watching
+from sync import sync as run_psync
 
 def get_asset_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
