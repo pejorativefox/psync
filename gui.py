@@ -216,11 +216,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Successfully configured, notify app to start watching
                 q_app = QtWidgets.QApplication.instance()
                 if hasattr(q_app, 'start_watching'):
-                    q_app.start_watching()
+                    q_app.start_watching() # pyright: ignore[reportAttributeAccessIssue, reportOptionalMemberAccess]
                 return True
             else:
                 # User aborted setup
-                QtWidgets.QApplication.instance().quit()
+                QtWidgets.QApplication.instance().quit() # pyright: ignore[reportOptionalMemberAccess]
                 return False
         return True
 
@@ -233,7 +233,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Notify app to start/update watching
             q_app = QtWidgets.QApplication.instance()
             if hasattr(q_app, 'start_watching'):
-                q_app.start_watching()
+                q_app.start_watching() # pyright: ignore[reportOptionalMemberAccess, reportAttributeAccessIssue]
             self.refresh_file_list()
 
     def start_sync(self):
