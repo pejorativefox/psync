@@ -16,7 +16,7 @@ class ServerClient:
     def _make_request(self, method, endpoint, **kwargs):
         url = f"{self.base_url}/{endpoint.lstrip('/')}"
         try:
-            response = requests.request(method, url, timeout=kwargs.pop('timeout', 10), **kwargs)
+            response = requests.request(method, url, timeout=kwargs.pop('timeout', 60), **kwargs)
             response.raise_for_status()
             return response
         except requests.exceptions.RequestException as e:
@@ -28,7 +28,7 @@ class ServerClient:
         with open(path, "rb") as f:
             files = {"file": (os.path.basename(path), f)}
             data = {"relative_path": rel_path, "file_hash": file_hash}
-            self._make_request("POST", "/up", files=files, data=data, timeout=(10, 3600))
+            self._make_request("POST", "/up", files=files, data=data, timeout=(300, 3600))
         logger.info(f"Uploaded {rel_path} to server.")
 
     def delete_file(self, rel_path: str):
