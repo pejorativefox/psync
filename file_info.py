@@ -349,8 +349,8 @@ def download_missing_from_server(config):
                 # we assume a local change (like a resurrection) is in progress.
                 # We skip the deletion to give the local state a chance to sync to the server.
                 mtime = datetime.fromtimestamp(os.path.getmtime(abs_path))
-                if (datetime.now() - mtime).total_seconds() < 30 or \
-                   (file_record and (datetime.now() - file_record.updated_at).total_seconds() < 30):
+                if (datetime.now() - mtime).total_seconds() < 10 or \
+                   (file_record and (datetime.now() - file_record.updated_at).total_seconds() < 10):
                     logger.info(f"Skipping server-requested deletion for recently modified file: {rel_path}")
                     continue
 
@@ -373,13 +373,12 @@ def download_missing_from_server(config):
             latest = file_record.latest_revision if file_record else None
 
             if not os.path.exists(abs_path):
+                # If missing locally but active on server, we need to download it.
                 if file_record and file_record.is_deleted:
-                    # If deleted locally, only download if server version is different/newer
-                    if not latest or latest.full_hash != server_hash:
-                        needs_download = True
-                else:
-                    # File is missing and not intentionally deleted locally
-                    needs_download = True
+                    # Skip if we just deleted it locally to prevent immediate resurrection
+                    if (datetime.now() - file_record.updated_at).total_seconds() < 10:
+                        continue
+                needs_download = True
             else:
                 local_hash = get_hash(abs_path)
                 if local_hash != server_hash:
@@ -388,6 +387,9 @@ def download_missing_from_server(config):
                         logger.warning(f"Conflict: {rel_path} was modified locally. Skipping download to prevent data loss.")
                         continue
                     needs_download = True
+                elif file_record and file_record.is_deleted:
+                    # File matches server but is incorrectly flagged as deleted locally
+                    process_file_change(abs_path, "Restored", config, skip_upload=True)
 
             if needs_download:
                 logger.info(f"Downloading missing/mismatched file from server: {rel_path}")
