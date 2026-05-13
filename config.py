@@ -39,17 +39,21 @@ class Config:
         path_str = self.settings.get("core", {}).get("base_path", ".")
         return str(Path(path_str).expanduser().resolve())
 
-    def save_settings(self, base_path, server_hostname, server_port):
+    def save_settings(self, base_path, server_hostname, server_port, remote_sync_interval, ignore_patterns):
         """Updates and saves the configuration settings to disk."""
         self.settings.setdefault("core", {})
         self.settings["core"]["base_path"] = base_path
         self.settings["core"]["server_hostname"] = server_hostname
         self.settings["core"]["server_port"] = int(server_port)
+        self.settings["core"]["remote_sync_interval"] = int(remote_sync_interval)
+        self.settings["core"]["ignore"] = ignore_patterns
 
         # Update local attributes for immediate use
         self.base_path = str(Path(base_path).expanduser().resolve())
         self.server_hostname = server_hostname
         self.server_port = int(server_port)
+        self.remote_sync_interval = int(remote_sync_interval)
+        self.ignore_patterns = ignore_patterns
 
         lines = []
         for section, values in self.settings.items():

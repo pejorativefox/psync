@@ -347,22 +347,33 @@ def download_missing_from_server(config):
             ).execute()
             if affected > 0:
                 deleted_count += 1
-            continue
-            
-        server_hash = s_file['h']
-        needs_download = False
-        if not os.path.exists(abs_path):
-            needs_download = True
         else:
-            # Calculate local hash to see if it matches the server
-            if get_hash(abs_path) != server_hash:
+            server_hash = s_file['h']
+            needs_download = False
+
+            # Fetch local record to check for resurrection or deletion race conditions
+            file_record = File.get_or_none(
+                (File.relative_path == rel_path) & (File.base_path == config.base_path)
+            )
+
+            if not os.path.exists(abs_path):
+                if file_record and file_record.is_deleted:
+                    # If deleted locally, only download if server version is different/newer
+                    latest = file_record.latest_revision
+                    if not latest or latest.full_hash != server_hash:
+                        needs_download = True
+                else:
+                    # File is missing and not intentionally deleted locally
+                    needs_download = True
+            elif get_hash(abs_path) != server_hash:
+                # File exists on disk, check if content matches server
                 needs_download = True
-        
-        if needs_download:
-            logger.info(f"Downloading missing/mismatched file from server: {rel_path}")
-            if download_file_from_server(server_hash, abs_path, config):
-                process_file_change(abs_path, "Downloaded", config, skip_upload=True)
-                downloaded_count += 1
+
+            if needs_download:
+                logger.info(f"Downloading missing/mismatched file from server: {rel_path}")
+                if download_file_from_server(server_hash, abs_path, config):
+                    process_file_change(abs_path, "Downloaded", config, skip_upload=True)
+                    downloaded_count += 1
 
     if downloaded_count == 0 and deleted_count == 0:
         logger.info("Local storage is already up to date with server.")

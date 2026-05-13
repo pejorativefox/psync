@@ -2,12 +2,23 @@ import sys
 import os
 import signal
 import logging
+import subprocess
 from datetime import datetime
-from database import init_db
+
 from PySide6 import QtWidgets, QtGui, QtCore
+
+from database import init_db
 from watch import watch, stop_watching
 from sync import sync as run_psync
 from client import ServerClient
+
+def xdg_open(target):
+    if sys.platform.startswith("win"):
+        os.startfile(target) # pyright: ignore[reportAttributeAccessIssue]
+    elif sys.platform == "darwin":
+        subprocess.run(["open", target], check=False)
+    else:
+        subprocess.run(["xdg-open", target], check=False)
 
 def get_asset_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -40,7 +51,15 @@ class ConfigWizard(QtWidgets.QDialog):
         self.port_edit = QtWidgets.QLineEdit(str(config.server_port))
         self.port_edit.setValidator(QtGui.QIntValidator(1, 65535))
         layout.addRow("Server Port:", self.port_edit)
-        
+
+        self.interval_edit = QtWidgets.QLineEdit(str(config.remote_sync_interval))
+        self.interval_edit.setValidator(QtGui.QIntValidator(5, 86400))
+        layout.addRow("Sync Interval (sec):", self.interval_edit)
+
+        self.ignore_edit = QtWidgets.QPlainTextEdit("\n".join(config.ignore_patterns))
+        self.ignore_edit.setMaximumHeight(80)
+        layout.addRow("Ignore Patterns (line-separated):", self.ignore_edit)
+
         self.buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Save | 
             QtWidgets.QDialogButtonBox.StandardButton.Cancel
@@ -59,8 +78,15 @@ class ConfigWizard(QtWidgets.QDialog):
         if not path or not os.path.isdir(path):
             QtWidgets.QMessageBox.warning(self, "Invalid Path", "Please select a valid local directory.")
             return
-            
-        self.config.save_settings(path, self.host_edit.text().strip(), self.port_edit.text().strip())
+
+        ignore_patterns = [p.strip() for p in self.ignore_edit.toPlainText().splitlines() if p.strip()]
+        self.config.save_settings(
+            path, 
+            self.host_edit.text().strip(), 
+            self.port_edit.text().strip(),
+            self.interval_edit.text().strip(),
+            ignore_patterns
+        )
         self.accept()
 
 class SyncWorkerThread(QtCore.QThread):
@@ -148,6 +174,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.search_box.setPlaceholderText("Fuzzy find files...")
         self.search_box.textChanged.connect(self.filter_file_list)
 
+        self.show_deleted_cb = QtWidgets.QCheckBox("Show Deleted")
+        self.show_deleted_cb.setChecked(False)
+        self.show_deleted_cb.stateChanged.connect(self.filter_file_list)
+
         self.clear_button = QtWidgets.QPushButton("Clear")
         self.clear_button.clicked.connect(self.search_box.clear)
 
@@ -155,8 +185,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sync_button.clicked.connect(self.start_sync)
 
         search_layout.addWidget(self.search_box)
+        search_layout.addWidget(self.show_deleted_cb)
         search_layout.addWidget(self.clear_button)
-        search_layout.addWidget(self.sync_button)
         layout.addLayout(search_layout)
 
         # File list widget
@@ -174,7 +204,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # Revisions button at the bottom
         self.revisions_button = QtWidgets.QPushButton("Revisions")
         self.revisions_button.clicked.connect(self.on_revisions_clicked)
-        layout.addWidget(self.revisions_button)
+        
+        bottom_buttons = QtWidgets.QHBoxLayout()
+        bottom_buttons.addWidget(self.sync_button)
+        bottom_buttons.addWidget(self.revisions_button)
+        layout.addLayout(bottom_buttons)
 
         # Initialize the status bar
         self.statusBar().showMessage("Ready")
@@ -277,6 +311,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 display_name += " (Deleted)"
             item = QtWidgets.QListWidgetItem(display_name)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, entry.get("f"))
+            item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, entry.get("d", False))
             self.list_widget.addItem(item)
 
         # Re-apply filter if text was already present during refresh
@@ -295,13 +330,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress_bar.hide()
         self.sync_button.setEnabled(True)
 
-    def filter_file_list(self, text):
-        """Filters the file list based on search text (case-insensitive)."""
-        search_term = text.lower()
+    def filter_file_list(self, _=None):
+        """Filters the file list based on search text and deleted status."""
+        search_term = self.search_box.text().lower()
+        show_deleted = self.show_deleted_cb.isChecked()
+
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
-            # Narrow down the list by hiding items that don't match the substring
-            item.setHidden(search_term not in item.text().lower())
+            is_deleted = bool(item.data(QtCore.Qt.ItemDataRole.UserRole + 1))
+
+            matches_search = search_term in item.text().lower()
+            visible_status = show_deleted or not is_deleted
+
+            item.setHidden(not (matches_search and visible_status))
 
     @QtCore.Slot(str)
     def append_log(self, message):
@@ -374,7 +415,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 try:
                     self.client.download_file(full_hash, save_path)
-                    QtWidgets.QMessageBox.information(dialog, "Success", f"Revision saved to:\n{save_path}")
+                    msg_box = QtWidgets.QMessageBox(dialog)
+                    msg_box.setWindowTitle("Success")
+                    msg_box.setText(f"Revision saved to:\n{save_path}")
+                    msg_box.setIcon(QtWidgets.QMessageBox.Icon.Information)
+                    open_btn = msg_box.addButton("Open", QtWidgets.QMessageBox.ButtonRole.ActionRole)
+                    msg_box.addButton(QtWidgets.QMessageBox.StandardButton.Ok)
+                    msg_box.exec()
+                    if msg_box.clickedButton() == open_btn:
+                        xdg_open(save_path)
                 except Exception as ex:
                     QtWidgets.QMessageBox.critical(dialog, "Download Error", f"Failed to download revision:\n{ex}")
 
@@ -387,6 +436,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event):
         event.ignore()
         self.hide()
+    
+    def changeEvent(self, event):
+        if event.type() == QtCore.QEvent.Type.ActivationChange and self.isActiveWindow():
+            # Window gained focus, refresh the file list
+            self.refresh_file_list()
 
 class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
     def __init__(self, icon, parent=None):
