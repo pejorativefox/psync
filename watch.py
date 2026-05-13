@@ -46,8 +46,13 @@ def watch(config):
     logger.info(f"Starting watch mode on: {config.base_path}")
     observer.start()
 
+    last_remote_sync = time.time()
     try:
         while not _stop_event.is_set():
+            if time.time() - last_remote_sync >= config.remote_sync_interval:
+                sync(config, pull_only=True)
+                last_remote_sync = time.time()
+
             _stop_event.wait(1)
     finally:
         observer.stop()
