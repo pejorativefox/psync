@@ -39,7 +39,6 @@ def get_revisions(relative_path: str):
     return [
         {
             "full_hash": rev.full_hash,
-            "short_hash": rev.short_hash,
             "size": rev.size,
             "last_modified": rev.last_modified.isoformat(),
             "created_at": rev.created_at.isoformat(),
@@ -118,7 +117,6 @@ async def move_file(
             FileRevision.create(
                 file=new_file,
                 full_hash=latest.full_hash,
-                short_hash=latest.short_hash,
                 size=latest.size,
                 last_modified=latest.last_modified
             )
@@ -136,16 +134,13 @@ async def upload_file(
     """
     # Store the file with its hash as the name
     storage_path = os.path.join(DATA_PATH, file_hash)
-    hasher32 = xxhash.xxh32()
     size = 0
 
     if not os.path.exists(storage_path):
         with open(storage_path, "wb") as f:
             while chunk := await file.read(65536):
                 size += len(chunk)
-                hasher32.update(chunk)
                 f.write(chunk)
-    short_hash = hasher32.hexdigest()
             
     file_record, created = File.get_or_create(
         relative_path=relative_path,
@@ -166,7 +161,6 @@ async def upload_file(
         FileRevision.create(
             file=file_record,
             full_hash=file_hash,
-            short_hash=short_hash,
             size=size,
             last_modified=datetime.now()
         )

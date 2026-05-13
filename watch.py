@@ -4,29 +4,29 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from file_info import process_file_change, handle_deletion, handle_move
 from sync import sync
-from config import BASE_PATH
 
 logger = logging.getLogger(__name__)
 
 
 class SyncHandler(FileSystemEventHandler):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
+        self.config = config
 
     def on_modified(self, event):
         if not event.is_directory:
-            process_file_change(str(event.src_path), "Modified")
+            process_file_change(str(event.src_path), "Modified", config=self.config)
 
     def on_created(self, event):
         if not event.is_directory:
-            process_file_change(str(event.src_path), "Created")
+            process_file_change(str(event.src_path), "Created", config=self.config)
 
     def on_deleted(self, event):
         if not event.is_directory:
-            handle_deletion(str(event.src_path))
+            handle_deletion(str(event.src_path), config=self.config)
 
     def on_moved(self, event):
-        handle_move(str(event.src_path), str(event.dest_path))
+        handle_move(str(event.src_path), str(event.dest_path), config=self.config)
         
 _keep_watching = True
 
@@ -35,16 +35,16 @@ def stop_watching():
     global _keep_watching
     _keep_watching = False
 
-def watch():
+def watch(config):
     global _keep_watching
     _keep_watching = True
-    sync()
+    sync(config)
 
-    event_handler = SyncHandler()
+    event_handler = SyncHandler(config)
     observer = Observer()
-    observer.schedule(event_handler, BASE_PATH, recursive=True)
+    observer.schedule(event_handler, config.base_path, recursive=True)
 
-    logger.info(f"Starting watch mode on: {BASE_PATH}")
+    logger.info(f"Starting watch mode on: {config.base_path}")
     observer.start()
 
     try:

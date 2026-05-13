@@ -4,8 +4,8 @@ import signal
 import logging
 from datetime import datetime
 import requests
+from database import init_db
 from PySide6 import QtWidgets, QtGui, QtCore
-from config import SETTINGS
 from watch import watch, stop_watching
 from sync import sync as run_psync
 
@@ -20,9 +20,13 @@ class SyncWorkerThread(QtCore.QThread):
     finished = QtCore.Signal()
     error = QtCore.Signal(str)
 
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
     def run(self):
         try:
-            run_psync()
+            run_psync(self.config)
             self.finished.emit()
         except Exception as e:
             self.error.emit(str(e))
@@ -32,12 +36,13 @@ class FileRefreshThread(QtCore.QThread):
     finished = QtCore.Signal(list)
     error = QtCore.Signal(str)
 
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
     def run(self):
         try:
-            server_host = SETTINGS.get("core", {}).get("server_hostname", "127.0.0.1")
-            server_port = SETTINGS.get("core", {}).get("server_port", 8000)
-            url = f"http://{server_host}:{server_port}/files"
-            
+            url = f"http://{self.config.server_hostname}:{self.config.server_port}/files"
             response = requests.get(url, timeout=5)
             response.raise_for_status()
             self.finished.emit(response.json())
@@ -46,13 +51,17 @@ class FileRefreshThread(QtCore.QThread):
 
 class WatchThread(QtCore.QThread):
     """Background thread to run the file system observer (watch)."""
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
     def stop(self):
         stop_watching()
         self.wait()
 
     def run(self):
         # This will perform an initial sync and then enter the watchdog loop
-        watch()
+        watch(self.config)
 
 class QtLogHandler(logging.Handler, QtCore.QObject):
     """Custom logging handler that emits a Qt signal for every log record."""
@@ -66,8 +75,9 @@ class QtLogHandler(logging.Handler, QtCore.QObject):
         self.log_signal.emit(self.format(record))
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
+        self.config = config
         self.setWindowTitle("Psync - Tracked Files")
         self.resize(600, 400)
         
@@ -125,12 +135,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().addPermanentWidget(self.progress_bar)
 
         # Set up the background refresh thread
-        self.refresh_thread = FileRefreshThread()
+        self.refresh_thread = FileRefreshThread(self.config)
         self.refresh_thread.finished.connect(self.on_refresh_finished)
         self.refresh_thread.error.connect(self.on_refresh_error)
 
         # Set up the background sync thread
-        self.sync_worker = SyncWorkerThread()
+        self.sync_worker = SyncWorkerThread(self.config)
         self.sync_worker.finished.connect(self.on_sync_finished)
         self.sync_worker.error.connect(self.on_sync_error)
 
@@ -218,11 +228,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # Extract the relative path by stripping the status suffix
         rel_path = item.text().split(" (")[0]
         
-        server_host = SETTINGS.get("core", {}).get("server_hostname", "127.0.0.1")
-        server_port = SETTINGS.get("core", {}).get("server_port", 8000)
-        url = f"http://{server_host}:{server_port}/revisions/{rel_path}"
-
         try:
+            url = f"http://{self.config.server_hostname}:{self.config.server_port}/revisions/{rel_path}"
             response = requests.get(url, timeout=5)
             response.raise_for_status()
             revisions = response.json()
@@ -246,7 +253,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 size_kb = rev.get("size", 0) / 1024
                 
                 tree_item = QtWidgets.QTreeWidgetItem([
-                    rev.get('short_hash', 'N/A'),
+                    rev.get('full_hash', 'N/A'),
                     ts,
                     f"{size_kb:.2f} KB"
                 ])
@@ -277,7 +284,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     return
 
                 try:
-                    download_url = f"http://{server_host}:{server_port}/down/{full_hash}"
+                    download_url = f"http://{self.config.server_hostname}:{self.config.server_port}/down/{full_hash}"
                     with requests.get(download_url, stream=True, timeout=30) as r:
                         r.raise_for_status()
                         with open(save_path, 'wb') as f:
@@ -306,11 +313,11 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
         self.setContextMenu(menu)
 
 class PsyncApp(QtWidgets.QApplication):
-    def __init__(self, args, icon_path):
+    def __init__(self, args, icon_path, config):
         super().__init__(args)
         self.setQuitOnLastWindowClosed(False)
         
-        self.window = MainWindow()
+        self.window = MainWindow(config)
 
         # Configure global logging to pipe into the UI
         self.log_handler = QtLogHandler()
@@ -321,7 +328,7 @@ class PsyncApp(QtWidgets.QApplication):
         self.tray_icon = SystemTrayIcon(QtGui.QIcon(icon_path))
 
         # Start the background file watcher
-        self.watch_thread = WatchThread()
+        self.watch_thread = WatchThread(config)
         self.watch_thread.start()
         self.aboutToQuit.connect(self.on_quit)
 
@@ -339,13 +346,15 @@ class PsyncApp(QtWidgets.QApplication):
                 self.window.show()
                 self.window.activateWindow()
 
-def main(image=None):
+def main(config, image=None):
     if image is None:
         image = get_asset_path('assets/idle.png')
     # Allow the application to be terminated with Ctrl+C in the terminal
     signal.signal(signal.SIGINT, signal.SIG_DFL)
-    app = PsyncApp(sys.argv, image)
+    init_db()
+    app = PsyncApp(sys.argv, image, config)
     sys.exit(app.exec())
 
 if __name__ == '__main__':
-    main()
+    from config import Config
+    main(Config())

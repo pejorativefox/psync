@@ -61,7 +61,6 @@ class FileRevision(BaseModel):
     """Represents a specific version or revision of a File."""
     file = peewee.ForeignKeyField(File, backref='revisions')
     full_hash = peewee.CharField() # Stores the xxh64 hash
-    short_hash = peewee.CharField() # Stores the xxh32 hash
     size = peewee.IntegerField() # Size of the file in bytes
     last_modified = peewee.DateTimeField() # Last modified timestamp from the file system
     created_at = peewee.DateTimeField(default=datetime.now) # Timestamp when this revision record was created
