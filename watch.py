@@ -1,11 +1,33 @@
 import logging
 import time
 from watchdog.observers import Observer
-from sync import sync, SyncHandler
+from watchdog.events import FileSystemEventHandler
+from file_info import process_file_change, handle_deletion, handle_move
+from sync import sync
 from config import BASE_PATH
 
 logger = logging.getLogger(__name__)
 
+
+class SyncHandler(FileSystemEventHandler):
+    def __init__(self):
+        super().__init__()
+
+    def on_modified(self, event):
+        if not event.is_directory:
+            process_file_change(str(event.src_path), "Modified")
+
+    def on_created(self, event):
+        if not event.is_directory:
+            process_file_change(str(event.src_path), "Created")
+
+    def on_deleted(self, event):
+        if not event.is_directory:
+            handle_deletion(str(event.src_path))
+
+    def on_moved(self, event):
+        handle_move(str(event.src_path), str(event.dest_path))
+        
 _keep_watching = True
 
 def stop_watching():
