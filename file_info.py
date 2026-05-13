@@ -25,23 +25,25 @@ def get_hash(filename):
             hasher64.update(chunk)
     return hasher64.hexdigest()
 
-def is_ignored(path: str, config):
+def is_ignored(path: str, config, rel_path: str = None): # pyright: ignore[reportArgumentType]
     """
     Checks if a given file path should be ignored based on a list of patterns.
 
     Args:
         path (str): The absolute path to the file or directory.
+        rel_path (str, optional): The pre-calculated relative path.
     Returns:
         bool: True if the path should be ignored, False otherwise.
     """
     ignore_patterns = config.ignore_patterns
     if not ignore_patterns:
         return False
-    try:
-        rel_path = os.path.relpath(path, config.base_path)
-    except ValueError:
-        # Path is not relative to base_path, e.g., on a different drive or invalid path
-        return False
+    
+    if rel_path is None:
+        try:
+            rel_path = os.path.relpath(path, config.base_path)
+        except ValueError:
+            return False
 
     parts = Path(rel_path).parts
     for pattern in ignore_patterns:
@@ -83,10 +85,7 @@ def process_file_change(path: str, event_type: str, config, source_path: str = "
         return
 
     rel_path = str(Path(path).relative_to(config.base_path))
-    file_obj, created = File.get_or_create(
-        relative_path=rel_path,
-        base_path=config.base_path
-    )
+    file_obj, created = File.get_or_create(relative_path=rel_path)
 
     fi = FileInformation(path)
     latest = file_obj.latest_revision
@@ -142,7 +141,6 @@ def handle_move(src_path: str, dest_path: str, config):
     with db.atomic():
         # Find all files that are either the file itself or children of the moved directory
         targets = File.select().where(
-            (File.base_path == config.base_path) & 
             (File.is_deleted == False) &
             ((File.relative_path == rel_src) | (File.relative_path.startswith(rel_src + "/")))
         )
@@ -160,7 +158,7 @@ def handle_move(src_path: str, dest_path: str, config):
                 old_file.updated_at = datetime.now()
                 old_file.save()
 
-                new_file, _ = File.get_or_create(relative_path=target_path, base_path=config.base_path)
+                new_file, _ = File.get_or_create(relative_path=target_path)
                 new_file.is_deleted = False
                 new_file.updated_at = datetime.now()
                 new_file.save()
@@ -208,7 +206,7 @@ def handle_deletion(path: str, config):
 
     # Update local DB
     query = File.update(is_deleted=True, updated_at=datetime.now()).where(
-        (File.relative_path == rel_path) & (File.base_path == config.base_path)
+        File.relative_path == rel_path
     )
     affected = query.execute()
     
@@ -258,13 +256,13 @@ def scan_files(config):
     with db.atomic():
         # Scan disk for new and modified files
         for ff in Path(config.base_path).rglob('*'):
-            if ff.is_file() and not is_ignored(str(ff), config):
-                rel_path = str(ff.relative_to(config.base_path))
+            rel_path = str(ff.relative_to(config.base_path))
+            if ff.is_file() and not is_ignored(str(ff), config, rel_path=rel_path):
                 process_file_change(str(ff), "Indexed", config)
                 found_rel_paths.add(rel_path)
 
         # Check database for files that no longer exist on disk
-        active_db_files = File.select().where((File.base_path == config.base_path) & (File.is_deleted == False))
+        active_db_files = File.select().where(File.is_deleted == False)
         for file_record in active_db_files:
             if file_record.relative_path not in found_rel_paths:
                 file_record.is_deleted = True
@@ -292,7 +290,7 @@ def upload_missing_to_server(config):
     server_inventory = {f['f']: f['h'] for f in server_files if not f.get('d', False)}
 
     # Get all local files that are not marked as deleted in our DB
-    local_files = File.select().where((File.is_deleted == False) & (File.base_path == config.base_path))
+    local_files = File.select().where(File.is_deleted == False)
     
     uploaded_count = 0
     for file_record in local_files:
@@ -343,7 +341,7 @@ def download_missing_from_server(config):
             
             # Ensure local DB reflects the deletion
             affected = File.update(is_deleted=True, updated_at=datetime.now()).where(
-                (File.relative_path == rel_path) & (File.base_path == config.base_path) & (File.is_deleted == False)
+                (File.relative_path == rel_path) & (File.is_deleted == False)
             ).execute()
             if affected > 0:
                 deleted_count += 1
@@ -352,9 +350,7 @@ def download_missing_from_server(config):
             needs_download = False
 
             # Fetch local record to check for resurrection or deletion race conditions
-            file_record = File.get_or_none(
-                (File.relative_path == rel_path) & (File.base_path == config.base_path)
-            )
+            file_record = File.get_or_none(File.relative_path == rel_path)
 
             if not os.path.exists(abs_path):
                 if file_record and file_record.is_deleted:

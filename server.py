@@ -3,26 +3,30 @@ from fastapi.responses import FileResponse
 import uvicorn
 from database import db, init_db, File, FileRevision
 from datetime import datetime
+import anyio
 import xxhash
 import os
 from pathlib import Path
-from contextlib import asynccontextmanager
 
 # Server Configuration (Environment Variables Only)
 DATA_PATH = str(Path(os.getenv("DATA_PATH", "data")).expanduser().resolve())
-BASE_PATH = str(Path(os.getenv("BASE_PATH", ".")).expanduser().resolve())
 SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
 SERVER_PORT = int(os.getenv("SERVER_PORT", 8000))
 DATABASE_PATH = os.getenv("DATABASE_PATH", "psync.db")
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+app = FastAPI()
+
+def validate_path(relative_path: str):
+    """Ensures the path is not attempting to traverse outside the base."""
+    if ".." in relative_path or os.path.isabs(relative_path):
+        raise HTTPException(status_code=400, detail="Invalid path structure")
+    return relative_path
+
+@app.on_event("startup")
+async def startup_event():
     """Initializes the database and ensures the data directory exists on startup."""
     init_db(DATABASE_PATH)
     os.makedirs(DATA_PATH, exist_ok=True)
-    yield
-
-app = FastAPI(lifespan=lifespan)
 
 @app.get("/files")
 def get_files():
@@ -32,9 +36,8 @@ def get_files():
 @app.get("/revisions/{relative_path:path}")
 def get_revisions(relative_path: str):
     """API endpoint to get the history of revisions for a specific file."""
-    file_record = File.get_or_none(
-        (File.relative_path == relative_path) & (File.base_path == BASE_PATH)
-    )
+    relative_path = validate_path(relative_path)
+    file_record = File.get_or_none(File.relative_path == relative_path)
     if not file_record:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -63,8 +66,9 @@ async def delete_file(relative_path: str):
     """
     Endpoint to mark a file as deleted on the server.
     """
+    relative_path = validate_path(relative_path)
     query = File.update(is_deleted=True, updated_at=datetime.now()).where(
-        (File.relative_path == relative_path) & (File.base_path == BASE_PATH)
+        File.relative_path == relative_path
     )
     affected = query.execute()
     if affected == 0:
@@ -80,13 +84,15 @@ async def move_file(
     Endpoint to handle file moves. 
     Marks the old path as deleted and creates/updates the new path with the same content.
     """
+    old_path = validate_path(old_path)
+    new_path = validate_path(new_path)
+
     if old_path == new_path:
         return {"status": "no-op", "message": "Paths are identical"}
 
     with db.atomic():
         # Find all files that are either the file itself or children of the moved directory
         targets = File.select().where(
-            (File.base_path == BASE_PATH) & 
             (File.is_deleted == False) &
             ((File.relative_path == old_path) | (File.relative_path.startswith(old_path + "/")))
         )
@@ -111,7 +117,7 @@ async def move_file(
             old_file.updated_at = datetime.now()
             old_file.save()
 
-            new_file, _ = File.get_or_create(relative_path=target_path, base_path=BASE_PATH)
+            new_file, _ = File.get_or_create(relative_path=target_path)
             new_file.is_deleted = False
             new_file.updated_at = datetime.now()
             new_file.save()
@@ -125,7 +131,7 @@ async def move_file(
     return {"status": "moved", "from": old_path, "to": new_path}
 
 @app.post("/up")
-def upload_file(
+async def upload_file(
     file: UploadFile,
     relative_path: str = Form(...),
     file_hash: str = Form(...)
@@ -134,20 +140,20 @@ def upload_file(
     Endpoint to upload new or changed files.
     Stores the file using its hash as the filename and updates the database.
     """
+    relative_path = validate_path(relative_path)
     # Store the file with its hash as the name
     storage_path = os.path.join(DATA_PATH, file_hash)
     size = 0
 
     if not os.path.exists(storage_path):
-        with open(storage_path, "wb") as f:
-            while chunk := file.file.read(65536):
+        # Use anyio to handle file writing without blocking the event loop
+        path = anyio.Path(storage_path)
+        async with await path.open("wb") as f:
+            while chunk := await file.read(65536):
                 size += len(chunk)
-                f.write(chunk)
+                await f.write(chunk)
             
-    file_record, created = File.get_or_create(
-        relative_path=relative_path,
-        base_path=BASE_PATH
-    )
+    file_record, created = File.get_or_create(relative_path=relative_path)
     
     # Optimization: skip the DB round-trip for latest revision if the file was just created
     latest = None

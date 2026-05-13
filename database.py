@@ -17,16 +17,9 @@ class File(BaseModel):
     Represents a file being tracked by psync.
     A file is uniquely identified by its relative_path within a specific base_path.
     """
-    relative_path = peewee.CharField()
-    base_path = peewee.CharField()
+    relative_path = peewee.CharField(unique=True)
     is_deleted = peewee.BooleanField(default=False)
     updated_at = peewee.DateTimeField(default=datetime.now)
-    
-    class Meta:
-        # Ensure that the combination of relative_path and base_path is unique
-        indexes = (
-            (('relative_path', 'base_path'), True),
-        )
 
     @property
     def latest_revision(self):

@@ -1,5 +1,6 @@
 import logging
 import time
+import threading
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from file_info import process_file_change, handle_deletion, handle_move
@@ -28,16 +29,14 @@ class SyncHandler(FileSystemEventHandler):
     def on_moved(self, event):
         handle_move(str(event.src_path), str(event.dest_path), config=self.config)
         
-_keep_watching = True
+_stop_event = threading.Event()
 
 def stop_watching():
     """Signals the watch loop to terminate."""
-    global _keep_watching
-    _keep_watching = False
+    _stop_event.set()
 
 def watch(config):
-    global _keep_watching
-    _keep_watching = True
+    _stop_event.clear()
     sync(config)
 
     event_handler = SyncHandler(config)
@@ -47,16 +46,9 @@ def watch(config):
     logger.info(f"Starting watch mode on: {config.base_path}")
     observer.start()
 
-    last_remote_sync = time.time()
-
     try:
-        while _keep_watching:
-            time.sleep(1)
-            
-            # Periodically check for remote changes without doing a full local scan
-            if time.time() - last_remote_sync >= config.remote_sync_interval:
-                sync(config, pull_only=True)
-                last_remote_sync = time.time()
+        while not _stop_event.is_set():
+            _stop_event.wait(1)
     finally:
         observer.stop()
         observer.join()
