@@ -23,12 +23,19 @@ if __name__ == "__main__":
     
     config = Config()
 
+    if args.server:
+        logger.info("Starting API server...")
+        run_server()
+        sys.exit(0)
+
+    if config.is_new and (args.sync or args.watch):
+        logger.error(f"Configuration file not found. A default has been created at: {config.settings_path}")
+        logger.error("Please edit this file to set your 'base_path' before running the client (sync, watch, or gui).")
+        sys.exit(1)
+
     if args.watch:
         logger.info("Starting watch process...")
         watch(config)
-    elif args.server:
-        logger.info("Starting API server...")
-        run_server()
     elif args.sync:
         logger.info("Starting One time sync...")
         sync(config)

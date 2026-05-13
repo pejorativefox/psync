@@ -7,6 +7,8 @@ class Config:
     def __init__(self, settings_path=None):
         if settings_path is None:
             settings_path = Path(user_config_dir("psync")) / "settings.toml"
+        self.settings_path = settings_path
+        self.is_new = False
         self.settings = self._load_settings(settings_path)
         self.base_path = self._get_base_path()
         self.ignore_patterns = self.settings.get("core", {}).get("ignore", [])
@@ -17,6 +19,7 @@ class Config:
         """Internal function to load settings from the local TOML file."""
         path = Path(settings_path)
         if not path.exists():
+            self.is_new = True
             path.parent.mkdir(parents=True, exist_ok=True)
             default_config = (
                 "[core]\n"
@@ -33,3 +36,31 @@ class Config:
         """Resolves the base path from settings to an absolute string."""
         path_str = self.settings.get("core", {}).get("base_path", ".")
         return str(Path(path_str).expanduser().resolve())
+
+    def save_settings(self, base_path, server_hostname, server_port):
+        """Updates and saves the configuration settings to disk."""
+        self.settings.setdefault("core", {})
+        self.settings["core"]["base_path"] = base_path
+        self.settings["core"]["server_hostname"] = server_hostname
+        self.settings["core"]["server_port"] = int(server_port)
+
+        # Update local attributes for immediate use
+        self.base_path = str(Path(base_path).expanduser().resolve())
+        self.server_hostname = server_hostname
+        self.server_port = int(server_port)
+
+        lines = []
+        for section, values in self.settings.items():
+            lines.append(f"[{section}]")
+            for k, v in values.items():
+                if isinstance(v, list):
+                    val = "[" + ", ".join(f'"{i}"' for i in v) + "]"
+                elif isinstance(v, str):
+                    val = f'"{v}"'
+                else:
+                    val = v
+                lines.append(f'{k} = {val}')
+            lines.append("") # Spacer
+        
+        self.settings_path.write_text("\n".join(lines))
+        self.is_new = False

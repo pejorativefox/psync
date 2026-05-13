@@ -15,6 +15,54 @@ def get_asset_path(relative_path):
     base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_path, relative_path)
 
+class ConfigWizard(QtWidgets.QDialog):
+    """Dialog to configure initial Psync settings."""
+    def __init__(self, config, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.setWindowTitle("Psync Configuration Wizard")
+        self.setMinimumWidth(450)
+        
+        layout = QtWidgets.QFormLayout(self)
+        
+        self.path_edit = QtWidgets.QLineEdit(config.base_path)
+        self.browse_btn = QtWidgets.QPushButton("Browse...")
+        self.browse_btn.clicked.connect(self.on_browse)
+        
+        path_layout = QtWidgets.QHBoxLayout()
+        path_layout.addWidget(self.path_edit)
+        path_layout.addWidget(self.browse_btn)
+        layout.addRow("Local Sync Folder:", path_layout)
+        
+        self.host_edit = QtWidgets.QLineEdit(config.server_hostname)
+        layout.addRow("Server Hostname:", self.host_edit)
+        
+        self.port_edit = QtWidgets.QLineEdit(str(config.server_port))
+        self.port_edit.setValidator(QtGui.QIntValidator(1, 65535))
+        layout.addRow("Server Port:", self.port_edit)
+        
+        self.buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Save | 
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        self.buttons.accepted.connect(self.on_save)
+        self.buttons.rejected.connect(self.reject)
+        layout.addRow(self.buttons)
+
+    def on_browse(self):
+        directory = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Sync Directory", self.path_edit.text())
+        if directory:
+            self.path_edit.setText(directory)
+
+    def on_save(self):
+        path = self.path_edit.text().strip()
+        if not path or not os.path.isdir(path):
+            QtWidgets.QMessageBox.warning(self, "Invalid Path", "Please select a valid local directory.")
+            return
+            
+        self.config.save_settings(path, self.host_edit.text().strip(), self.port_edit.text().strip())
+        self.accept()
+
 class SyncWorkerThread(QtCore.QThread):
     """Background thread to run the full synchronization logic."""
     finished = QtCore.Signal()
@@ -82,6 +130,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # Set up menu bar
         menubar = self.menuBar()
         file_menu = menubar.addMenu("&File")
+        settings_action = file_menu.addAction("&Settings...")
+        settings_action.triggered.connect(self.open_config_wizard)
         exit_action = file_menu.addAction("E&xit")
         exit_action.triggered.connect(QtWidgets.QApplication.instance().quit) # pyright: ignore[reportOptionalMemberAccess]
 
@@ -147,7 +197,44 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.setCentralWidget(container)
         
-        self.refresh_file_list()
+        # Delay check to allow UI to render
+        QtCore.QTimer.singleShot(0, self.initial_setup_check)
+
+    def initial_setup_check(self):
+        """Checks if the configuration is valid; shows wizard if not."""
+        if self.check_config():
+            self.refresh_file_list()
+
+    def check_config(self):
+        """
+        Validates the current configuration. 
+        Returns True if valid, or shows Wizard. Returns False if user cancels.
+        """
+        if self.config.is_new or not os.path.isdir(self.config.base_path):
+            wizard = ConfigWizard(self.config, self)
+            if wizard.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                # Successfully configured, notify app to start watching
+                q_app = QtWidgets.QApplication.instance()
+                if hasattr(q_app, 'start_watching'):
+                    q_app.start_watching()
+                return True
+            else:
+                # User aborted setup
+                QtWidgets.QApplication.instance().quit()
+                return False
+        return True
+
+    def open_config_wizard(self):
+        """Opens the configuration wizard manually."""
+        wizard = ConfigWizard(self.config, self)
+        if wizard.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            # Re-initialize the client with new config details
+            self.client = ServerClient(self.config)
+            # Notify app to start/update watching
+            q_app = QtWidgets.QApplication.instance()
+            if hasattr(q_app, 'start_watching'):
+                q_app.start_watching()
+            self.refresh_file_list()
 
     def start_sync(self):
         """Starts the full synchronization process."""
@@ -308,6 +395,7 @@ class SystemTrayIcon(QtWidgets.QSystemTrayIcon):
 class PsyncApp(QtWidgets.QApplication):
     def __init__(self, args, icon_path, config):
         super().__init__(args)
+        self.config = config
         self.setQuitOnLastWindowClosed(False)
         
         self.window = MainWindow(config)
@@ -321,15 +409,32 @@ class PsyncApp(QtWidgets.QApplication):
         self.tray_icon = SystemTrayIcon(QtGui.QIcon(icon_path))
 
         # Start the background file watcher
-        self.watch_thread = WatchThread(config)
-        self.watch_thread.start()
+        self.watch_thread = None
+        self._last_started_path = None
+        if not config.is_new and os.path.isdir(config.base_path):
+            self.start_watching()
+
         self.aboutToQuit.connect(self.on_quit)
 
         self.tray_icon.activated.connect(self.on_tray_activated)
         self.tray_icon.show()
 
+    def start_watching(self):
+        new_path = self.config.base_path
+        
+        if self.watch_thread and self._last_started_path != new_path:
+            logging.info(f"Restarting watch thread: path changed from {self._last_started_path} to {new_path}")
+            self.watch_thread.stop()
+            self.watch_thread = None
+
+        if not self.watch_thread and os.path.isdir(new_path):
+            self._last_started_path = new_path
+            self.watch_thread = WatchThread(self.config)
+            self.watch_thread.start()
+
     def on_quit(self):
-        self.watch_thread.stop()
+        if self.watch_thread:
+            self.watch_thread.stop()
 
     def on_tray_activated(self, reason):
         if reason == QtWidgets.QSystemTrayIcon.ActivationReason.Trigger:
