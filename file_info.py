@@ -10,18 +10,19 @@ from client import ServerClient
 
 logger = logging.getLogger(__name__)
 
-def get_hash(filename):
+def get_hash(filename, chunk_size=1048576):
     """
     Generates an xxh64 hash for the given file.
     
     Args:
         filename (str): The path to the file to hash.
+        chunk_size (int): Size of chunks to read (default 1MB).
     Returns:
         str: xxh64_hex
     """
     hasher64 = xxhash.xxh64()
     with open(filename, "rb") as f:
-        while chunk := f.read(65536):
+        while chunk := f.read(chunk_size):
             hasher64.update(chunk)
     return hasher64.hexdigest()
 
@@ -62,9 +63,14 @@ def upload_to_server(path: str, rel_path: str, file_hash: str, config):
     """
     client = ServerClient(config)
     try:
+        start_time = datetime.now()
+        size_mb = os.path.getsize(path) / (1024 * 1024)
+        logger.info(f"Commencing upload for {rel_path} ({size_mb:.2f} MB)...")
         client.upload_file(path, rel_path, file_hash)
+        duration = (datetime.now() - start_time).total_seconds()
+        logger.info(f"Successfully uploaded {rel_path} in {duration:.2f}s")
     except Exception as e:
-        logger.error(f"Failed to upload {rel_path}: {e}")
+        logger.error(f"Upload failed for {rel_path}: {e}", exc_info=True)
 
 def process_file_change(path: str, event_type: str, config, source_path: str = "", skip_upload: bool = False):
     """

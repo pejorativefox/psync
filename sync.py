@@ -18,16 +18,22 @@ def sync(config, pull_only=False):
         return
 
     try:
+        start_time = datetime.now()
         if pull_only:
             logger.info("Checking for remote changes from other clients...")
         else:
             logger.info("Starting full synchronization...")
             scan_files(config)
 
+        logger.debug("Downloading missing files from server...")
         download_missing_from_server(config)
 
         if not pull_only:
+            logger.info("Uploading missing files to server (this may take a while for large files)...")
             upload_missing_to_server(config)
+
+        duration = (datetime.now() - start_time).total_seconds()
+        logger.info("Synchronization completed successfully in %.2f seconds.", duration)
 
         # Update the last sync time in the database
         ApplicationState.replace(key='last_sync', value=datetime.now()).execute()
