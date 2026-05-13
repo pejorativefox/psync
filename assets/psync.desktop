@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Psync
+Comment=File synchronization tool
+Exec=psync
+Icon=idle
+Terminal=false
+Categories=Utility;
+Keywords=sync;files;backup;
