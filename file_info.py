@@ -338,10 +338,22 @@ def download_missing_from_server(config):
     for s_file in server_files:
         rel_path = s_file['f']
         abs_path = os.path.join(config.base_path, rel_path)
-        
+
+        # Fetch local record to check for resurrection or deletion race conditions
+        file_record = File.get_or_none(File.relative_path == rel_path)
+
         if s_file.get('d', False):
             # Handle file deleted on server
             if os.path.exists(abs_path) and os.path.isfile(abs_path):
+                # If the file was modified or the database record was updated very recently,
+                # we assume a local change (like a resurrection) is in progress.
+                # We skip the deletion to give the local state a chance to sync to the server.
+                mtime = datetime.fromtimestamp(os.path.getmtime(abs_path))
+                if (datetime.now() - mtime).total_seconds() < 30 or \
+                   (file_record and (datetime.now() - file_record.updated_at).total_seconds() < 30):
+                    logger.info(f"Skipping server-requested deletion for recently modified file: {rel_path}")
+                    continue
+
                 logger.info(f"Removing file deleted on server: {rel_path}")
                 try:
                     os.remove(abs_path)
@@ -358,8 +370,6 @@ def download_missing_from_server(config):
             server_hash = s_file['h']
             needs_download = False
 
-            # Fetch local record to check for resurrection or deletion race conditions
-            file_record = File.get_or_none(File.relative_path == rel_path)
             latest = file_record.latest_revision if file_record else None
 
             if not os.path.exists(abs_path):
