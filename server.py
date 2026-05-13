@@ -2,17 +2,24 @@ from fastapi import FastAPI, UploadFile, Form, HTTPException
 from fastapi.responses import FileResponse
 import uvicorn
 from database import db, init_db, File, FileRevision
-from config import DATA_PATH, BASE_PATH
 from datetime import datetime
 import xxhash
 import os
+from pathlib import Path
+
+# Server Configuration (Environment Variables Only)
+DATA_PATH = str(Path(os.getenv("DATA_PATH", "data")).expanduser().resolve())
+BASE_PATH = str(Path(os.getenv("BASE_PATH", ".")).expanduser().resolve())
+SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
+SERVER_PORT = int(os.getenv("SERVER_PORT", 8000))
+DATABASE_PATH = os.getenv("DATABASE_PATH", "psync.db")
 
 app = FastAPI()
 
 @app.on_event("startup")
 async def startup_event():
     """Initializes the database and ensures the data directory exists on startup."""
-    init_db()
+    init_db(DATABASE_PATH)
     os.makedirs(DATA_PATH, exist_ok=True)
 
 @app.get("/files")
@@ -166,6 +173,6 @@ async def upload_file(
         
     return {"relative_path": relative_path, "hash": file_hash, "status": "processed"}
 
-def run_server(host: str = "0.0.0.0", port: int = 8000):
+def run_server(host: str = SERVER_HOST, port: int = SERVER_PORT):
     """Starts the FastAPI server using uvicorn."""
     uvicorn.run(app, host=host, port=port)

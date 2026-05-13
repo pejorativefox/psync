@@ -7,7 +7,12 @@ import requests
 from PySide6 import QtWidgets, QtGui, QtCore
 from config import SETTINGS
 from psync import sync as run_psync, watch, stop_watching
-from assets import get_asset_path
+
+def get_asset_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    # PyInstaller extracts assets to a temporary folder stored in sys._MEIPASS
+    base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
 
 class SyncWorkerThread(QtCore.QThread):
     """Background thread to run the full synchronization logic."""
@@ -333,11 +338,13 @@ class PsyncApp(QtWidgets.QApplication):
                 self.window.show()
                 self.window.activateWindow()
 
-def main(image):
+def main(image=None):
+    if image is None:
+        image = get_asset_path('assets/idle.png')
     # Allow the application to be terminated with Ctrl+C in the terminal
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     app = PsyncApp(sys.argv, image)
     sys.exit(app.exec())
 
 if __name__ == '__main__':
-    main(get_asset_path('assets/idle.png'))
+    main()

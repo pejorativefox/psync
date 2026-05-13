@@ -8,8 +8,11 @@ services:
       - "8000:8000"
     environment:
       - DATABASE_PATH=/app/db/psync.db
+      - DATA_PATH=/app/data
+      - BASE_PATH=.
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8000
     volumes:
       - ./server/data:/app/data
-      # Mount a directory for the database to ensure it is created as a file, not a folder
       - ./server/db:/app/db
     restart: unless-stopped # Automatically restart the container unless it is explicitly stopped
