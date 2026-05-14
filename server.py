@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, Form, HTTPException
 from fastapi.responses import FileResponse
 import uvicorn
-from database import db, init_db, File, FileRevision
+from database import db, init_db, File, FileRevision, ChangeLog
 from datetime import datetime
 import anyio
 import xxhash
@@ -33,6 +33,15 @@ async def startup_event():
 def get_files():
     """API endpoint to serve the JSON dump of all tracked files."""
     return File.get_all_files_data()
+
+@app.get("/changelog")
+def get_changelog(since_id: int = 0):
+    """Returns all changes that occurred after the given log ID."""
+    changes = ChangeLog.select().where(ChangeLog.id > since_id).order_by(ChangeLog.id.asc())
+    return [
+        {"id": c.id, "op": c.operation, "f": c.relative_path, "nf": c.new_relative_path, "h": c.full_hash, "s": c.size}
+        for c in changes
+    ]
 
 @app.get("/revisions/{relative_path:path}")
 def get_revisions(relative_path: str):
@@ -74,6 +83,10 @@ async def delete_file(relative_path: str):
     affected = query.execute()
     if affected == 0:
         raise HTTPException(status_code=404, detail="File not found")
+    
+    # Log the deletion
+    ChangeLog.create(operation='deleted', relative_path=relative_path)
+    
     return {"relative_path": relative_path, "status": "deleted"}
 
 @app.post("/move")
@@ -129,6 +142,12 @@ async def move_file(
                 size=latest.size,
                 last_modified=latest.last_modified
             )
+            
+    # Log the move
+    ChangeLog.create(
+        operation='moved', relative_path=old_path, new_relative_path=new_path
+    )
+
     return {"status": "moved", "from": old_path, "to": new_path}
 
 @app.post("/up")
@@ -178,6 +197,14 @@ async def upload_file(
             full_hash=file_hash,
             size=size,
             last_modified=datetime.now()
+        )
+        
+        # Log the update
+        ChangeLog.create(
+            operation='updated',
+            relative_path=relative_path,
+            full_hash=file_hash,
+            size=size
         )
         
     return {"relative_path": relative_path, "hash": file_hash, "status": "processed"}

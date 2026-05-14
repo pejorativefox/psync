@@ -68,7 +68,17 @@ class FileRevision(BaseModel):
 class ApplicationState(BaseModel):
     """Stores general application metadata and state."""
     key = peewee.CharField(unique=True)
-    value = peewee.DateTimeField()
+    value = peewee.CharField()
+
+class ChangeLog(BaseModel):
+    """A log of all changes occurring on the server to be replayed by clients."""
+    # ID is automatic incremental primary key
+    operation = peewee.CharField() # 'updated', 'deleted', 'moved'
+    relative_path = peewee.CharField()
+    new_relative_path = peewee.CharField(null=True) # Used for moves
+    full_hash = peewee.CharField(null=True)
+    size = peewee.IntegerField(null=True)
+    created_at = peewee.DateTimeField(default=datetime.now)
 
 def init_db(db_path=None):
     """Initializes the database connection and ensures tables are created."""
@@ -90,7 +100,7 @@ def init_db(db_path=None):
         }))
 
     db.connect(reuse_if_open=True)
-    db.create_tables([File, FileRevision, ApplicationState])
+    db.create_tables([File, FileRevision, ApplicationState, ChangeLog])
 
 def close_db():
     """Closes the database connection."""

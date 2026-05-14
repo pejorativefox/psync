@@ -5,7 +5,7 @@ import logging
 import fnmatch
 import os
 
-from database import db, File, FileRevision
+from database import db, File, FileRevision, ApplicationState
 from client import ServerClient
 
 logger = logging.getLogger(__name__)
@@ -408,3 +408,65 @@ def download_missing_from_server(config):
         logger.info("Local storage is already up to date with server.")
     else:
         logger.info(f"Download reconciliation complete. {downloaded_count} files downloaded, {deleted_count} files removed.")
+
+def sync_from_remote_log(config):
+    """
+    Fetches the server's change log and replays events locally.
+    This is much more efficient than a full server inventory scan.
+    """
+    client = ServerClient(config)
+    
+    # Get the last processed log ID from local state
+    cursor_rec = ApplicationState.get_or_none(ApplicationState.key == 'remote_log_id')
+    
+    # Fallback: if no cursor, we should probably do a full sync once
+    if not cursor_rec:
+        logger.info("No remote log cursor found. Performing full reconciliation...")
+        download_missing_from_server(config)
+        # Set initial cursor to the highest current ID if possible, or 0
+        # For simplicity here, we start from 0 if no record exists
+        last_id = 0
+    else:
+        last_id = int(cursor_rec.value) 
+
+    changes = client.get_changelog(last_id)
+    if not changes:
+        return
+
+    logger.info(f"Replaying {len(changes)} remote changes...")
+    
+    new_last_id = last_id
+    for change in changes:
+        op = change['op']
+        rel_path = change['f']
+        abs_path = os.path.join(config.base_path, rel_path)
+        
+        if op == 'updated':
+            server_hash = change['h']
+            local_hash = get_hash(abs_path) if os.path.exists(abs_path) else None
+            if local_hash != server_hash:
+                temp_path = abs_path + ".psync_tmp"
+                if download_file_from_server(server_hash, temp_path, config):
+                    os.replace(temp_path, abs_path)
+                    process_file_change(abs_path, "Downloaded", config, skip_upload=True)
+                    
+        elif op == 'deleted':
+            if os.path.exists(abs_path):
+                os.remove(abs_path)
+                handle_deletion(abs_path, config) # Updates local DB
+                
+        elif op == 'moved':
+            new_rel_path = change['nf']
+            new_abs_path = os.path.join(config.base_path, new_rel_path)
+            if os.path.exists(abs_path):
+                os.makedirs(os.path.dirname(new_abs_path), exist_ok=True)
+                os.rename(abs_path, new_abs_path)
+                # Update local DB state
+                handle_move(abs_path, new_abs_path, config)
+
+        new_last_id = max(new_last_id, change['id'])
+
+    # Update cursor
+    ApplicationState.insert(key='remote_log_id', value=str(new_last_id)).on_conflict_replace().execute()
+    
+    logger.info(f"Sync log replayed up to ID {new_last_id}")

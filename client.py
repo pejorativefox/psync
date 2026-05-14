@@ -47,6 +47,11 @@ class ServerClient:
         response = self._make_request("GET", "/files")
         return response.json()
 
+    def get_changelog(self, since_id: int):
+        """Fetches the change log from the server starting after since_id."""
+        response = self._make_request("GET", f"/changelog?since_id={since_id}")
+        return response.json()
+
     def get_revisions(self, rel_path: str):
         """Fetches the revision history for a specific file."""
         response = self._make_request("GET", f"/revisions/{rel_path}")
