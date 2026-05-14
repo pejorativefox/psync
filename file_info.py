@@ -5,7 +5,7 @@ import logging
 import fnmatch
 import os
 
-from database import db, File, FileRevision, ApplicationState
+from database import db
 from client import ServerClient
 
 logger = logging.getLogger(__name__)
@@ -94,21 +94,19 @@ def process_file_change(path: str, event_type: str, config, source_path: str = "
         return
 
     rel_path = str(Path(path).relative_to(config.base_path))
-    file_obj, created = File.get_or_create(relative_path=rel_path)
+    file_obj, created = db.get_or_create_file(rel_path)
 
     fi = FileInformation(path)
-    latest = file_obj.latest_revision
+    latest = db.get_latest_revision(file_obj)
 
     recreated = file_obj.is_deleted
     if created or recreated or latest is None or latest.full_hash != fi.hash:
-        file_obj.is_deleted = False
-        file_obj.updated_at = datetime.now()
-        file_obj.save()
-        FileRevision.create(
-            file=file_obj,
-            full_hash=fi.hash,
-            size=fi.size,
-            last_modified=fi.last_modified
+        db.update_file_status(file_obj, is_deleted=False)
+        db.create_file_revision(
+            file_obj,
+            fi.hash, # pyright: ignore[reportArgumentType]
+            fi.size,
+            fi.last_modified
         )
         
         # Upload the file to the server
@@ -152,13 +150,10 @@ def handle_move(src_path: str, dest_path: str, config, notify_server: bool = Tru
     success = False
     with db.atomic():
         # Find all files that are either the file itself or children of the moved directory
-        targets = File.select().where(
-            (File.is_deleted == False) &
-            ((File.relative_path == rel_src) | (File.relative_path.startswith(rel_src + "/")))
-        )
+        targets = db.get_active_files_by_prefix(rel_src)
 
         for old_file in targets:
-            latest = old_file.latest_revision
+            latest = db.get_latest_revision(old_file)
             if latest:
                 if old_file.relative_path == rel_src:
                     target_path = rel_dst
@@ -166,20 +161,16 @@ def handle_move(src_path: str, dest_path: str, config, notify_server: bool = Tru
                     suffix = old_file.relative_path[len(rel_src):]
                     target_path = rel_dst + suffix
 
-                old_file.is_deleted = True
-                old_file.updated_at = datetime.now()
-                old_file.save()
+                db.update_file_status(old_file, is_deleted=True)
 
-                new_file, _ = File.get_or_create(relative_path=target_path)
-                new_file.is_deleted = False
-                new_file.updated_at = datetime.now()
-                new_file.save()
+                new_file, _ = db.get_or_create_file(target_path)
+                db.update_file_status(new_file, is_deleted=False)
 
-                FileRevision.create(
-                    file=new_file,
-                    full_hash=latest.full_hash,
-                    size=latest.size,
-                    last_modified=latest.last_modified
+                db.create_file_revision(
+                    new_file,
+                    latest.full_hash,
+                    latest.size,
+                    latest.last_modified
                 )
                 success = True
 
@@ -217,10 +208,7 @@ def handle_deletion(path: str, config, notify_server: bool = True):
         return
 
     # Update local DB
-    query = File.update(is_deleted=True, updated_at=datetime.now()).where(
-        File.relative_path == rel_path
-    )
-    affected = query.execute()
+    affected = db.mark_file_deleted(rel_path)
     
     if affected > 0:
         logger.info(f"Deleted: {rel_path}")
@@ -275,12 +263,10 @@ def scan_files(config):
                 found_rel_paths.add(rel_path)
 
         # Check database for files that no longer exist on disk
-        active_db_files = File.select().where(File.is_deleted == False)
+        active_db_files = db.get_active_files()
         for file_record in active_db_files:
             if file_record.relative_path not in found_rel_paths:
-                file_record.is_deleted = True
-                file_record.updated_at = datetime.now()
-                file_record.save()
+                db.update_file_status(file_record, is_deleted=True)
                 logger.info(f"Detected deletion during scan: {file_record.relative_path}")
                 delete_from_server(file_record.relative_path, config)
 
@@ -303,11 +289,11 @@ def upload_missing_to_server(config):
     server_inventory = {f['f']: f['h'] for f in server_files if not f.get('d', False)}
 
     # Get all local files that are not marked as deleted in our DB
-    local_files = File.select().where(File.is_deleted == False)
+    local_files = db.get_active_files()
     
     uploaded_count = 0
     for file_record in local_files:
-        latest = file_record.latest_revision
+        latest = db.get_latest_revision(file_record)
         if not latest:
             continue
             
@@ -344,7 +330,7 @@ def download_missing_from_server(config):
         abs_path = os.path.join(config.base_path, rel_path)
 
         # Fetch local record to check for resurrection or deletion race conditions
-        file_record = File.get_or_none(File.relative_path == rel_path)
+        file_record = db.get_file(rel_path)
 
         if s_file.get('d', False):
             # Handle file deleted on server
@@ -365,16 +351,14 @@ def download_missing_from_server(config):
                     logger.error(f"Failed to delete local file {rel_path}: {e}")
             
             # Ensure local DB reflects the deletion
-            affected = File.update(is_deleted=True, updated_at=datetime.now()).where(
-                (File.relative_path == rel_path) & (File.is_deleted == False)
-            ).execute()
+            affected = db.mark_active_file_deleted(rel_path)
             if affected > 0:
                 deleted_count += 1
         else:
             server_hash = s_file['h']
             needs_download = False
 
-            latest = file_record.latest_revision if file_record else None
+            latest = db.get_latest_revision(file_record) if file_record else None
 
             if not os.path.exists(abs_path):
                 # If missing locally but active on server, we need to download it.
@@ -421,17 +405,17 @@ def sync_from_remote_log(config):
     client = ServerClient(config)
     
     # Get the last processed log ID from local state
-    cursor_rec = ApplicationState.get_or_none(ApplicationState.key == 'remote_log_id')
+    cursor_value = db.get_app_state('remote_log_id')
     
     # Fallback: if no cursor, we should probably do a full sync once
-    if not cursor_rec:
+    if not cursor_value:
         logger.info("No remote log cursor found. Performing full reconciliation...")
         download_missing_from_server(config)
         # Set initial cursor to the highest current ID if possible, or 0
         # For simplicity here, we start from 0 if no record exists
         last_id = 0
     else:
-        last_id = int(cursor_rec.value) 
+        last_id = int(cursor_value) 
 
     changes = client.get_changelog(last_id)
     if not changes:
@@ -471,6 +455,6 @@ def sync_from_remote_log(config):
         new_last_id = max(new_last_id, change['id'])
 
     # Update cursor
-    ApplicationState.insert(key='remote_log_id', value=str(new_last_id)).on_conflict_replace().execute()
+    db.set_app_state('remote_log_id', str(new_last_id))
     
     logger.info(f"Sync log replayed up to ID {new_last_id}")

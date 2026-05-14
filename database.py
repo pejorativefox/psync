@@ -5,12 +5,12 @@ from pathlib import Path
 from platformdirs import user_data_dir
 
 # Database setup
-db = peewee.Proxy()
+_db = peewee.Proxy()
 
 class BaseModel(peewee.Model):
     """A base model that will use our SQLite database."""
     class Meta:
-        database = db
+        database = _db
 
 class File(BaseModel):
     """
@@ -80,29 +80,109 @@ class ChangeLog(BaseModel):
     size = peewee.IntegerField(null=True)
     created_at = peewee.DateTimeField(default=datetime.now)
 
-def init_db(db_path=None):
-    """Initializes the database connection and ensures tables are created."""
-    if db_path is None:
-        db_path = os.environ.get("DATABASE_PATH")
-        if not db_path:
-            db_path = Path(user_data_dir("psync")) / "psync.db"
-        
-    # Initialize the proxy if it hasn't been already
-    if db.obj is None:
-        db_dir = os.path.dirname(os.path.abspath(db_path))
-        if db_dir:
-            os.makedirs(db_dir, exist_ok=True)
+class Database:
+    """Facade for database operations."""
+    def atomic(self):
+        return _db.atomic()
+
+    def init_db(self, db_path=None):
+        """Initializes the database connection and ensures tables are created."""
+        if db_path is None:
+            db_path = os.environ.get("DATABASE_PATH")
+            if not db_path:
+                db_path = Path(user_data_dir("psync")) / "psync.db"
             
-        db.initialize(peewee.SqliteDatabase(db_path, pragmas={
-            'journal_mode': 'wal',
-            'cache_size': -1 * 64000,
-            'foreign_keys': 1,
-            'busy_timeout': 5000,
-        }))
+        # Initialize the proxy if it hasn't been already
+        if _db.obj is None:
+            db_dir = os.path.dirname(os.path.abspath(db_path))
+            if db_dir:
+                os.makedirs(db_dir, exist_ok=True)
+                
+            _db.initialize(peewee.SqliteDatabase(db_path, pragmas={
+                'journal_mode': 'wal',
+                'cache_size': -1 * 64000,
+                'foreign_keys': 1,
+                'busy_timeout': 5000,
+            }))
 
-    db.connect(reuse_if_open=True)
-    db.create_tables([File, FileRevision, ApplicationState, ChangeLog])
+        _db.connect(reuse_if_open=True)
+        _db.create_tables([File, FileRevision, ApplicationState, ChangeLog])
 
-def close_db():
-    """Closes the database connection."""
-    db.close()
+    def close(self):
+        """Closes the database connection."""
+        _db.close()
+
+    def get_or_create_file(self, relative_path: str):
+        return File.get_or_create(relative_path=relative_path)
+
+    def get_file(self, relative_path: str):
+        return File.get_or_none(File.relative_path == relative_path)
+
+    def get_active_files(self):
+        return File.select().where(File.is_deleted == False)
+
+    def get_active_files_by_prefix(self, prefix: str):
+        return File.select().where(
+            (File.is_deleted == False) &
+            ((File.relative_path == prefix) | (File.relative_path.startswith(prefix + "/")))
+        )
+
+    def active_files_exist_by_prefix(self, prefix: str) -> bool:
+        return self.get_active_files_by_prefix(prefix).exists()
+
+    def mark_file_deleted(self, relative_path: str) -> int:
+        query = File.update(is_deleted=True, updated_at=datetime.now()).where(
+            File.relative_path == relative_path
+        )
+        return query.execute()
+
+    def mark_active_file_deleted(self, relative_path: str) -> int:
+        query = File.update(is_deleted=True, updated_at=datetime.now()).where(
+            (File.relative_path == relative_path) & (File.is_deleted == False)
+        )
+        return query.execute()
+
+    def update_file_status(self, file_obj: File, is_deleted: bool):
+        file_obj.is_deleted = is_deleted # pyright: ignore[reportAttributeAccessIssue]
+        file_obj.updated_at = datetime.now() # pyright: ignore[reportAttributeAccessIssue]
+        file_obj.save()
+
+    def get_all_files_data(self):
+        return File.get_all_files_data()
+
+    def get_latest_revision(self, file_obj: File):
+        return file_obj.latest_revision
+
+    def get_all_revisions(self, file_obj: File):
+        return file_obj.all_revisions
+
+    def create_file_revision(self, file_obj: File, full_hash: str, size: int, last_modified: datetime):
+        return FileRevision.create(
+            file=file_obj,
+            full_hash=full_hash,
+            size=size,
+            last_modified=last_modified
+        )
+
+    def get_app_state(self, key: str):
+        record = ApplicationState.get_or_none(ApplicationState.key == key)
+        return record.value if record else None
+
+    def set_app_state(self, key: str, value: str):
+        ApplicationState.insert(key=key, value=value).on_conflict_replace().execute()
+
+    def get_changelog_since(self, since_id: int):
+        return ChangeLog.select().where(ChangeLog.id > since_id).order_by(ChangeLog.id.asc()) # pyright: ignore[reportAttributeAccessIssue]
+
+    def log_change(self, operation: str, relative_path: str, new_relative_path: str = None, full_hash: str = None, size: int = None): # pyright: ignore[reportArgumentType]
+        return ChangeLog.create(
+            operation=operation,
+            relative_path=relative_path,
+            new_relative_path=new_relative_path,
+            full_hash=full_hash,
+            size=size
+        )
+
+db = Database()
+init_db = db.init_db
+close_db = db.close
