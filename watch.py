@@ -4,7 +4,7 @@ import threading
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from file_info import process_file_change, handle_deletion, handle_move
-from sync import sync
+from sync import sync, sync_lock
 
 logger = logging.getLogger(__name__)
 
@@ -16,18 +16,22 @@ class SyncHandler(FileSystemEventHandler):
 
     def on_modified(self, event):
         if not event.is_directory:
-            process_file_change(str(event.src_path), "Modified", config=self.config)
+            with sync_lock:
+                process_file_change(str(event.src_path), "Modified", config=self.config)
 
     def on_created(self, event):
         if not event.is_directory:
-            process_file_change(str(event.src_path), "Created", config=self.config)
+            with sync_lock:
+                process_file_change(str(event.src_path), "Created", config=self.config)
 
     def on_deleted(self, event):
         if not event.is_directory:
-            handle_deletion(str(event.src_path), config=self.config)
+            with sync_lock:
+                handle_deletion(str(event.src_path), config=self.config)
 
     def on_moved(self, event):
-        handle_move(str(event.src_path), str(event.dest_path), config=self.config)
+        with sync_lock:
+            handle_move(str(event.src_path), str(event.dest_path), config=self.config)
         
 _stop_event = threading.Event()
 

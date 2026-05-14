@@ -97,6 +97,7 @@ def init_db(db_path=None):
             'journal_mode': 'wal',
             'cache_size': -1 * 64000,
             'foreign_keys': 1,
+            'busy_timeout': 5000,
         }))
 
     db.connect(reuse_if_open=True)

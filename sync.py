@@ -9,11 +9,11 @@ from database import ApplicationState
 
 logger = logging.getLogger(__name__)
 
-_sync_lock = threading.Lock()
+sync_lock = threading.Lock()
 
 def sync(config, pull_only=False):
     """Performs synchronization between local and server."""
-    if not _sync_lock.acquire(blocking=False):
+    if not sync_lock.acquire(blocking=False):
         logger.info("Synchronization already in progress. Skipping concurrent request.")
         return
 
@@ -44,4 +44,4 @@ def sync(config, pull_only=False):
         # Update the last sync time in the database
         ApplicationState.replace(key='last_sync', value=datetime.now().isoformat()).execute()
     finally:
-        _sync_lock.release()
+        sync_lock.release()

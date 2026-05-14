@@ -120,10 +120,13 @@ def process_file_change(path: str, event_type: str, config, source_path: str = "
             log_msg += f" (from {source_path})"
         logger.info(f"{log_msg} [Revision: {fi.hash}]")
 
-def handle_move(src_path: str, dest_path: str, config):
+def handle_move(src_path: str, dest_path: str, config, notify_server: bool = True):
     """
     Handles a file move event by updating the local database and 
     notifying the server via a specialized move endpoint.
+    
+    Args:
+        notify_server (bool): If False, avoids notifying the server (used for remote log replay).
     """
     if is_ignored(src_path, config) and is_ignored(dest_path, config):
         return
@@ -183,7 +186,7 @@ def handle_move(src_path: str, dest_path: str, config):
     if not success and os.path.isdir(dest_path):
         return # Nothing in DB to move for this directory
 
-    if success:
+    if success and notify_server:
         # Notify server of the move
         client = ServerClient(config)
         try:
@@ -203,7 +206,7 @@ def delete_from_server(rel_path: str, config):
     except Exception as e:
         logger.error(f"Failed to notify server of deletion for {rel_path}: {e}")
 
-def handle_deletion(path: str, config):
+def handle_deletion(path: str, config, notify_server: bool = True):
     """Marks a file as deleted locally and notifies the server."""
     if is_ignored(path, config):
         return
@@ -221,7 +224,8 @@ def handle_deletion(path: str, config):
     
     if affected > 0:
         logger.info(f"Deleted: {rel_path}")
-        delete_from_server(rel_path, config)
+        if notify_server:
+            delete_from_server(rel_path, config)
 
 class FileInformation(object):
     """Encapsulates file metadata and provides lazy-loaded hashing functionality."""
@@ -453,7 +457,7 @@ def sync_from_remote_log(config):
         elif op == 'deleted':
             if os.path.exists(abs_path):
                 os.remove(abs_path)
-                handle_deletion(abs_path, config) # Updates local DB
+                handle_deletion(abs_path, config, notify_server=False)
                 
         elif op == 'moved':
             new_rel_path = change['nf']
@@ -462,7 +466,7 @@ def sync_from_remote_log(config):
                 os.makedirs(os.path.dirname(new_abs_path), exist_ok=True)
                 os.rename(abs_path, new_abs_path)
                 # Update local DB state
-                handle_move(abs_path, new_abs_path, config)
+                handle_move(abs_path, new_abs_path, config, notify_server=False)
 
         new_last_id = max(new_last_id, change['id'])
 
