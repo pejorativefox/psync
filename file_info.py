@@ -144,11 +144,16 @@ def handle_move(src_path: str, dest_path: str, config, notify_server: bool = Tru
         return
         
     if not src_tracked and dest_tracked:
-        process_file_change(dest_path, "Created", config)
+        if os.path.isdir(dest_path):
+            for root, _, files in os.walk(dest_path):
+                for f in files:
+                    process_file_change(os.path.join(root, f), "Created", config, skip_upload=not notify_server)
+        else:
+            process_file_change(dest_path, "Created", config, skip_upload=not notify_server)
         return
         
     if src_tracked and not dest_tracked:
-        handle_deletion(src_path, config)
+        handle_deletion(src_path, config, notify_server=notify_server)
         return
 
     if rel_src == rel_dst:
@@ -215,13 +220,16 @@ def handle_deletion(path: str, config, notify_server: bool = True):
     except ValueError:
         return
 
-    # Update local DB
-    affected = db.mark_active_file_deleted(rel_path)
-    
-    if affected > 0:
-        logger.info(f"Deleted: {rel_path}")
-        if notify_server:
-            delete_from_server(rel_path, config)
+    # Update local DB for the file, or all files under the directory
+    targets = list(db.get_active_files_by_prefix(rel_path))
+    for file_record in targets:
+        f_rel_path = file_record.relative_path
+        affected = db.mark_active_file_deleted(f_rel_path)
+        
+        if affected > 0:
+            logger.info(f"Deleted: {f_rel_path}")
+            if notify_server:
+                delete_from_server(f_rel_path, config)
 
 def remove_empty_dirs(path: str, base_path: str):
     """Recursively removes empty directories from the given path up to the base_path."""
