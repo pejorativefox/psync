@@ -505,13 +505,13 @@ class PsyncApp(QtWidgets.QApplication):
                 self.window.show()
                 self.window.activateWindow()
 
-def main(config, image=None):
-    if image is None:
-        image = get_asset_path('assets/idle.png')
+def main(config, icon_path=None):
+    if icon_path is None:
+        icon_path = get_asset_path('assets/idle.png')
     # Allow the application to be terminated with Ctrl+C in the terminal
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     init_db()
-    app = PsyncApp(sys.argv, image, config)
+    app = PsyncApp(sys.argv, icon_path, config)
     sys.exit(app.exec())
 
 if __name__ == '__main__':

@@ -60,7 +60,7 @@ def is_ignored(path: str, config, rel_path: str = None): # pyright: ignore[repor
             return True
     return False
 
-def upload_to_server(path: str, rel_path: str, file_hash: str, config):
+def upload_to_server(path: str, rel_path: str, file_hash: str, last_modified: datetime, config):
     """
     Sends a POST request to the server's /up endpoint to upload a file.
     """
@@ -69,7 +69,7 @@ def upload_to_server(path: str, rel_path: str, file_hash: str, config):
         start_time = datetime.now()
         size_mb = os.path.getsize(path) / (1024 * 1024)
         logger.info(f"Commencing upload for {rel_path} ({size_mb:.2f} MB)...")
-        client.upload_file(path, rel_path, file_hash)
+        client.upload_file(path, rel_path, file_hash, last_modified.timestamp())
         duration = (datetime.now() - start_time).total_seconds()
         logger.info(f"Successfully uploaded {rel_path} in {duration:.2f}s")
     except Exception as e:
@@ -111,7 +111,7 @@ def process_file_change(path: str, event_type: str, config, source_path: str = "
         
         # Upload the file to the server
         if not skip_upload:
-            upload_to_server(path, rel_path, str(fi.hash), config)
+            upload_to_server(path, rel_path, str(fi.hash), fi.last_modified, config)
         
         log_msg = f"{event_type}: {rel_path}"
         if source_path:
@@ -208,12 +208,23 @@ def handle_deletion(path: str, config, notify_server: bool = True):
         return
 
     # Update local DB
-    affected = db.mark_file_deleted(rel_path)
+    affected = db.mark_active_file_deleted(rel_path)
     
     if affected > 0:
         logger.info(f"Deleted: {rel_path}")
         if notify_server:
             delete_from_server(rel_path, config)
+
+def remove_empty_dirs(path: str, base_path: str):
+    """Recursively removes empty directories from the given path up to the base_path."""
+    dir_path = Path(path).parent.resolve()
+    base_dir = Path(base_path).resolve()
+    while dir_path != base_dir and dir_path.is_relative_to(base_dir):
+        try:
+            dir_path.rmdir()
+            dir_path = dir_path.parent
+        except OSError:
+            break
 
 class FileInformation(object):
     """Encapsulates file metadata and provides lazy-loaded hashing functionality."""
@@ -270,21 +281,19 @@ def scan_files(config):
                 logger.info(f"Detected deletion during scan: {file_record.relative_path}")
                 delete_from_server(file_record.relative_path, config)
 
-def get_server_files(config):
-    """Fetches the list of files currently known by the server."""
-    client = ServerClient(config)
-    try:
-        return client.get_server_files()
-    except Exception:
-        return []
-
 def upload_missing_to_server(config):
     """
     Compares local database state with the server's file list and uploads 
     any files that are missing or have mismatched hashes on the server.
     """
     logger.info("Checking server for missing or mismatched files...")
-    server_files = get_server_files(config)
+    client = ServerClient(config)
+    try:
+        server_files = client.get_server_files()
+    except Exception:
+        logger.error("Could not retrieve file list from server. Aborting upload reconciliation.")
+        return
+
     # Create a lookup for active server files: {relative_path: hash}
     server_inventory = {f['f']: f['h'] for f in server_files if not f.get('d', False)}
 
@@ -302,7 +311,7 @@ def upload_missing_to_server(config):
             abs_path = os.path.join(config.base_path, rel_path)
             if os.path.exists(abs_path):
                 logger.info(f"Uploading missing/mismatched file: {rel_path}")
-                upload_to_server(abs_path, rel_path, latest.full_hash, config)
+                upload_to_server(abs_path, rel_path, latest.full_hash, latest.last_modified, config)
                 uploaded_count += 1
 
     if uploaded_count == 0:
@@ -321,8 +330,13 @@ def download_file_from_server(file_hash: str, local_path: str, config):
 def download_missing_from_server(config):
     """Fetches server file list and downloads anything missing or outdated locally."""
     logger.info("Checking local storage for missing or mismatched files from server...")
-    server_files = get_server_files(config)
-    
+    client = ServerClient(config)
+    try:
+        server_files = client.get_server_files()
+    except Exception:
+        logger.error("Could not retrieve file list from server. Aborting download reconciliation.")
+        return
+
     downloaded_count = 0
     deleted_count = 0
     for s_file in server_files:
@@ -347,6 +361,7 @@ def download_missing_from_server(config):
                 logger.info(f"Removing file deleted on server: {rel_path}")
                 try:
                     os.remove(abs_path)
+                    remove_empty_dirs(abs_path, config.base_path)
                 except Exception as e:
                     logger.error(f"Failed to delete local file {rel_path}: {e}")
             
@@ -441,6 +456,7 @@ def sync_from_remote_log(config):
         elif op == 'deleted':
             if os.path.exists(abs_path):
                 os.remove(abs_path)
+                remove_empty_dirs(abs_path, config.base_path)
                 handle_deletion(abs_path, config, notify_server=False)
                 
         elif op == 'moved':
@@ -449,6 +465,7 @@ def sync_from_remote_log(config):
             if os.path.exists(abs_path):
                 os.makedirs(os.path.dirname(new_abs_path), exist_ok=True)
                 os.rename(abs_path, new_abs_path)
+                remove_empty_dirs(abs_path, config.base_path)
                 # Update local DB state
                 handle_move(abs_path, new_abs_path, config, notify_server=False)
 

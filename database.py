@@ -142,6 +142,41 @@ class Database:
         )
         return query.execute()
 
+    def move_path(self, old_path: str, new_path: str) -> bool:
+        """
+        Moves a file or directory in the database.
+        Marks all files under old_path as deleted and recreates them under new_path
+        with their latest revision.
+        Returns True if any files were successfully moved, False otherwise.
+        """
+        moved_something = False
+        with self.atomic():
+            targets = self.get_active_files_by_prefix(old_path)
+            if not targets.exists():
+                return False
+
+            for old_file in targets:
+                latest = self.get_latest_revision(old_file)
+                if not latest:
+                    continue
+
+                if old_file.relative_path == old_path:
+                    target_path = new_path
+                else:
+                    suffix = old_file.relative_path[len(old_path):]
+                    target_path = new_path + suffix
+
+                self.update_file_status(old_file, is_deleted=True)
+
+                new_file, _ = self.get_or_create_file(target_path)
+                self.update_file_status(new_file, is_deleted=False)
+
+                self.create_file_revision(
+                    new_file, latest.full_hash, latest.size, latest.last_modified
+                )
+                moved_something = True
+        return moved_something
+
     def update_file_status(self, file_obj: File, is_deleted: bool):
         file_obj.is_deleted = is_deleted # pyright: ignore[reportAttributeAccessIssue]
         file_obj.updated_at = datetime.now() # pyright: ignore[reportAttributeAccessIssue]

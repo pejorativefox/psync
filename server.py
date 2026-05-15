@@ -77,9 +77,9 @@ async def delete_file(relative_path: str):
     Endpoint to mark a file as deleted on the server.
     """
     relative_path = validate_path(relative_path)
-    affected = db.mark_file_deleted(relative_path)
+    affected = db.mark_active_file_deleted(relative_path)
     if affected == 0:
-        raise HTTPException(status_code=404, detail="File not found")
+        return {"relative_path": relative_path, "status": "already_deleted"}
     
     # Log the deletion
     db.log_change(operation='deleted', relative_path=relative_path)
@@ -101,37 +101,10 @@ async def move_file(
     if old_path == new_path:
         return {"status": "no-op", "message": "Paths are identical"}
 
-    with db.atomic():
-        # Find all files that are either the file itself or children of the moved directory
-        if not db.active_files_exist_by_prefix(old_path):
-            raise HTTPException(status_code=404, detail="No active files found at source path")
+    success = db.move_path(old_path, new_path)
+    if not success:
+        raise HTTPException(status_code=404, detail="No active files found at source path")
 
-        targets = db.get_active_files_by_prefix(old_path)
-        for old_file in targets:
-            latest = db.get_latest_revision(old_file)
-            if not latest:
-                continue
-
-            # Determine the new path for this specific file
-            if old_file.relative_path == old_path:
-                target_path = new_path
-            else:
-                # Replace the old directory prefix with the new directory prefix
-                suffix = old_file.relative_path[len(old_path):]
-                target_path = new_path + suffix
-
-            db.update_file_status(old_file, is_deleted=True)
-
-            new_file, _ = db.get_or_create_file(target_path)
-            db.update_file_status(new_file, is_deleted=False)
-
-            db.create_file_revision(
-                new_file,
-                latest.full_hash,
-                latest.size,
-                latest.last_modified
-            )
-            
     # Log the move
     db.log_change(
         operation='moved', relative_path=old_path, new_relative_path=new_path
@@ -143,7 +116,8 @@ async def move_file(
 async def upload_file(
     file: UploadFile,
     relative_path: str = Form(...),
-    file_hash: str = Form(...)
+    file_hash: str = Form(...),
+    last_modified: float = Form(...)
 ):
     """
     Endpoint to upload new or changed files.
@@ -183,7 +157,7 @@ async def upload_file(
             file_record,
             file_hash,
             size,
-            datetime.now()
+            datetime.fromtimestamp(last_modified)
         )
         
         # Log the update

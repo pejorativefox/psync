@@ -23,11 +23,15 @@ class ServerClient:
             logger.error(f"Server request failed for {method} {url}: {e}")
             raise
 
-    def upload_file(self, path: str, rel_path: str, file_hash: str):
+    def upload_file(self, path: str, rel_path: str, file_hash: str, last_modified: float):
         """Sends a POST request to the server's /up endpoint to upload a file."""
         with open(path, "rb") as f:
             files = {"file": (os.path.basename(path), f)}
-            data = {"relative_path": rel_path, "file_hash": file_hash}
+            data = {
+                "relative_path": rel_path, 
+                "file_hash": file_hash,
+                "last_modified": last_modified
+            }
             self._make_request("POST", "/up", files=files, data=data, timeout=(300, 3600))
         logger.info(f"Uploaded {rel_path} to server.")
 
