@@ -126,21 +126,29 @@ def handle_move(src_path: str, dest_path: str, config, notify_server: bool = Tru
     Args:
         notify_server (bool): If False, avoids notifying the server (used for remote log replay).
     """
-    if is_ignored(src_path, config) and is_ignored(dest_path, config):
+    rel_src = None
+    try:
+        rel_src = str(Path(src_path).relative_to(config.base_path))
+        src_tracked = not is_ignored(src_path, config, rel_path=rel_src)
+    except ValueError:
+        src_tracked = False
+
+    rel_dst = None
+    try:
+        rel_dst = str(Path(dest_path).relative_to(config.base_path))
+        dest_tracked = not is_ignored(dest_path, config, rel_path=rel_dst)
+    except ValueError:
+        dest_tracked = False
+
+    if not src_tracked and not dest_tracked:
         return
         
-    if is_ignored(src_path, config):
+    if not src_tracked and dest_tracked:
         process_file_change(dest_path, "Created", config)
         return
         
-    if is_ignored(dest_path, config):
+    if src_tracked and not dest_tracked:
         handle_deletion(src_path, config)
-        return
-
-    try:
-        rel_src = str(Path(src_path).relative_to(config.base_path))
-        rel_dst = str(Path(dest_path).relative_to(config.base_path))
-    except (ValueError, Exception):
         return
 
     if rel_src == rel_dst:
