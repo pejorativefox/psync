@@ -62,7 +62,7 @@ def is_ignored(path: str, config, rel_path: str = None): # pyright: ignore[repor
 
 def upload_to_server(path: str, rel_path: str, file_hash: str, last_modified: datetime, config) -> bool:
     """
-    Sends a POST request to the server's /up endpoint to upload a file.
+    Sends a POST request to the server's /upload endpoint to upload a file.
     Returns True if successful, False otherwise.
     """
     client = ServerClient(config)

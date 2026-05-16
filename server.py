@@ -3,8 +3,6 @@ from fastapi.responses import FileResponse
 import uvicorn
 from database import db, init_db
 from datetime import datetime
-import anyio
-import xxhash
 import os
 import tempfile
 from pathlib import Path
@@ -61,7 +59,7 @@ def get_revisions(relative_path: str):
         for rev in db.get_all_revisions(file_record)
     ]
 
-@app.get("/down/{file_hash}")
+@app.get("/download/{file_hash}")
 async def download_file(file_hash: str):
     """
     Endpoint to download a file by its hash.
@@ -112,7 +110,7 @@ async def move_file(
 
     return {"status": "moved", "from": old_path, "to": new_path}
 
-@app.post("/up")
+@app.post("/upload")
 async def upload_file(
     file: UploadFile,
     relative_path: str = Form(...),
