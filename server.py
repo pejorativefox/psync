@@ -1,10 +1,8 @@
 from fastapi import FastAPI, UploadFile, Form, HTTPException
 from fastapi.responses import FileResponse
 import uvicorn
-from database import db, init_db, File, FileRevision, ChangeLog
+from database import db, init_db
 from datetime import datetime
-import anyio
-import xxhash
 import os
 import tempfile
 from pathlib import Path
@@ -32,12 +30,12 @@ async def startup_event():
 @app.get("/files")
 def get_files():
     """API endpoint to serve the JSON dump of all tracked files."""
-    return File.get_all_files_data()
+    return db.get_all_files_data()
 
 @app.get("/changelog")
 def get_changelog(since_id: int = 0):
     """Returns all changes that occurred after the given log ID."""
-    changes = ChangeLog.select().where(ChangeLog.id > since_id).order_by(ChangeLog.id.asc())
+    changes = db.get_changelog_since(since_id)
     return [
         {"id": c.id, "op": c.operation, "f": c.relative_path, "nf": c.new_relative_path, "h": c.full_hash, "s": c.size}
         for c in changes
@@ -47,7 +45,7 @@ def get_changelog(since_id: int = 0):
 def get_revisions(relative_path: str):
     """API endpoint to get the history of revisions for a specific file."""
     relative_path = validate_path(relative_path)
-    file_record = File.get_or_none(File.relative_path == relative_path)
+    file_record = db.get_file(relative_path)
     if not file_record:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -58,10 +56,10 @@ def get_revisions(relative_path: str):
             "last_modified": rev.last_modified.isoformat(),
             "created_at": rev.created_at.isoformat(),
         }
-        for rev in file_record.all_revisions
+        for rev in db.get_all_revisions(file_record)
     ]
 
-@app.get("/down/{file_hash}")
+@app.get("/download/{file_hash}")
 async def download_file(file_hash: str):
     """
     Endpoint to download a file by its hash.
@@ -77,15 +75,12 @@ async def delete_file(relative_path: str):
     Endpoint to mark a file as deleted on the server.
     """
     relative_path = validate_path(relative_path)
-    query = File.update(is_deleted=True, updated_at=datetime.now()).where(
-        File.relative_path == relative_path
-    )
-    affected = query.execute()
+    affected = db.mark_active_file_deleted(relative_path)
     if affected == 0:
-        raise HTTPException(status_code=404, detail="File not found")
+        return {"relative_path": relative_path, "status": "already_deleted"}
     
     # Log the deletion
-    ChangeLog.create(operation='deleted', relative_path=relative_path)
+    db.log_change(operation='deleted', relative_path=relative_path)
     
     return {"relative_path": relative_path, "status": "deleted"}
 
@@ -104,57 +99,23 @@ async def move_file(
     if old_path == new_path:
         return {"status": "no-op", "message": "Paths are identical"}
 
-    with db.atomic():
-        # Find all files that are either the file itself or children of the moved directory
-        targets = File.select().where(
-            (File.is_deleted == False) &
-            ((File.relative_path == old_path) | (File.relative_path.startswith(old_path + "/")))
-        )
+    success = db.move_path(old_path, new_path)
+    if not success:
+        raise HTTPException(status_code=404, detail="No active files found at source path")
 
-        if not targets.exists():
-            raise HTTPException(status_code=404, detail="No active files found at source path")
-
-        for old_file in targets:
-            latest = old_file.latest_revision
-            if not latest:
-                continue
-
-            # Determine the new path for this specific file
-            if old_file.relative_path == old_path:
-                target_path = new_path
-            else:
-                # Replace the old directory prefix with the new directory prefix
-                suffix = old_file.relative_path[len(old_path):]
-                target_path = new_path + suffix
-
-            old_file.is_deleted = True
-            old_file.updated_at = datetime.now()
-            old_file.save()
-
-            new_file, _ = File.get_or_create(relative_path=target_path)
-            new_file.is_deleted = False
-            new_file.updated_at = datetime.now()
-            new_file.save()
-
-            FileRevision.create(
-                file=new_file,
-                full_hash=latest.full_hash,
-                size=latest.size,
-                last_modified=latest.last_modified
-            )
-            
     # Log the move
-    ChangeLog.create(
+    db.log_change(
         operation='moved', relative_path=old_path, new_relative_path=new_path
     )
 
     return {"status": "moved", "from": old_path, "to": new_path}
 
-@app.post("/up")
+@app.post("/upload")
 async def upload_file(
     file: UploadFile,
     relative_path: str = Form(...),
-    file_hash: str = Form(...)
+    file_hash: str = Form(...),
+    last_modified: float = Form(...)
 ):
     """
     Endpoint to upload new or changed files.
@@ -179,28 +140,26 @@ async def upload_file(
                 os.remove(temp_path)
             raise
             
-    file_record, created = File.get_or_create(relative_path=relative_path)
+    file_record, created = db.get_or_create_file(relative_path)
     
     # Optimization: skip the DB round-trip for latest revision if the file was just created
     latest = None
     if not created:
-        latest = file_record.latest_revision
+        latest = db.get_latest_revision(file_record)
     
     # Only create a new revision if the file is new, was deleted, or the content hash changed
     if created or file_record.is_deleted or not latest or latest.full_hash != file_hash:
-        file_record.is_deleted = False
-        file_record.updated_at = datetime.now()
-        file_record.save()
+        db.update_file_status(file_record, is_deleted=False)
         
-        FileRevision.create(
-            file=file_record,
-            full_hash=file_hash,
-            size=size,
-            last_modified=datetime.now()
+        db.create_file_revision(
+            file_record,
+            file_hash,
+            size,
+            datetime.fromtimestamp(last_modified)
         )
         
         # Log the update
-        ChangeLog.create(
+        db.log_change(
             operation='updated',
             relative_path=relative_path,
             full_hash=file_hash,

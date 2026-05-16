@@ -25,9 +25,8 @@ class SyncHandler(FileSystemEventHandler):
                 process_file_change(str(event.src_path), "Created", config=self.config)
 
     def on_deleted(self, event):
-        if not event.is_directory:
-            with sync_lock:
-                handle_deletion(str(event.src_path), config=self.config)
+        with sync_lock:
+            handle_deletion(str(event.src_path), config=self.config)
 
     def on_moved(self, event):
         with sync_lock:

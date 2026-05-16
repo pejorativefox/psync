@@ -23,12 +23,16 @@ class ServerClient:
             logger.error(f"Server request failed for {method} {url}: {e}")
             raise
 
-    def upload_file(self, path: str, rel_path: str, file_hash: str):
-        """Sends a POST request to the server's /up endpoint to upload a file."""
+    def upload_file(self, path: str, rel_path: str, file_hash: str, last_modified: float):
+        """Sends a POST request to the server's /upload endpoint to upload a file."""
         with open(path, "rb") as f:
             files = {"file": (os.path.basename(path), f)}
-            data = {"relative_path": rel_path, "file_hash": file_hash}
-            self._make_request("POST", "/up", files=files, data=data, timeout=(300, 3600))
+            data = {
+                "relative_path": rel_path, 
+                "file_hash": file_hash,
+                "last_modified": last_modified
+            }
+            self._make_request("POST", "/upload", files=files, data=data, timeout=(300, 3600))
         logger.info(f"Uploaded {rel_path} to server.")
 
     def delete_file(self, rel_path: str):
@@ -59,7 +63,7 @@ class ServerClient:
 
     def download_file(self, file_hash: str, local_path: str):
         """Downloads a file from the server by its hash."""
-        url = f"{self.base_url}/down/{file_hash}" # Direct URL for streaming
+        url = f"{self.base_url}/download/{file_hash}" # Direct URL for streaming
         try:
             response = requests.get(url, stream=True, timeout=30)
             response.raise_for_status()

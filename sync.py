@@ -5,7 +5,7 @@ from file_info import (
     scan_files, upload_missing_to_server, 
     sync_from_remote_log
 )
-from database import ApplicationState
+from database import db
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +20,8 @@ def sync(config, pull_only=False):
     try:
         start_time = datetime.now()
         # Check if we have a remote log cursor. If not, we need a full reconciliation.
-        cursor_rec = ApplicationState.get_or_none(ApplicationState.key == 'remote_log_id')
-        needs_reconciliation = cursor_rec is None
+        cursor_value = db.get_app_state('remote_log_id')
+        needs_reconciliation = cursor_value is None
 
         if pull_only:
             logger.info("Checking for remote changes from other clients...")
@@ -42,6 +42,6 @@ def sync(config, pull_only=False):
         logger.info("Synchronization completed successfully in %.2f seconds.", duration)
 
         # Update the last sync time in the database
-        ApplicationState.replace(key='last_sync', value=datetime.now().isoformat()).execute()
+        db.set_app_state('last_sync', datetime.now().isoformat())
     finally:
         sync_lock.release()
