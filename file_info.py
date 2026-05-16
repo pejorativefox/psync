@@ -163,7 +163,7 @@ def handle_move(src_path: str, dest_path: str, config, notify_server: bool = Tru
     success = False
     with db.atomic():
         # Find all files that are either the file itself or children of the moved directory
-        targets = db.get_active_files_by_prefix(rel_src)
+        targets = db.get_active_files_by_prefix(str(rel_src))
 
         for old_file in targets:
             latest = db.get_latest_revision(old_file)
@@ -171,12 +171,12 @@ def handle_move(src_path: str, dest_path: str, config, notify_server: bool = Tru
                 if old_file.relative_path == rel_src:
                     target_path = rel_dst
                 else:
-                    suffix = old_file.relative_path[len(rel_src):]
+                    suffix = old_file.relative_path[len(str(rel_src)):]
                     target_path = rel_dst + suffix
 
                 db.update_file_status(old_file, is_deleted=True)
 
-                new_file, _ = db.get_or_create_file(target_path)
+                new_file, _ = db.get_or_create_file(str(target_path))
                 db.update_file_status(new_file, is_deleted=False)
 
                 db.create_file_revision(
@@ -194,7 +194,7 @@ def handle_move(src_path: str, dest_path: str, config, notify_server: bool = Tru
         # Notify server of the move
         client = ServerClient(config)
         try:
-            client.move_file(rel_src, rel_dst)
+            client.move_file(str(rel_src), str(rel_dst))
             return
         except Exception as e:
             logger.error(f"Failed to notify server of move from {rel_src}: {e}")
@@ -365,13 +365,16 @@ def download_missing_from_server(config):
         if s_file.get('d', False):
             # Handle file deleted on server
             if os.path.exists(abs_path) and os.path.isfile(abs_path):
-                # If the file was modified or the database record was updated very recently,
-                # we assume a local change (like a resurrection) is in progress.
-                # We skip the deletion to give the local state a chance to sync to the server.
-                mtime = datetime.fromtimestamp(os.path.getmtime(abs_path))
-                if (datetime.now() - mtime).total_seconds() < 10 or \
-                   (file_record and (datetime.now() - file_record.updated_at).total_seconds() < 10):
-                    logger.info(f"Skipping server-requested deletion for recently modified file: {rel_path}")
+                local_hash = get_hash(abs_path)
+                server_deleted_hash = s_file.get('h')
+                
+                if server_deleted_hash and local_hash != server_deleted_hash:
+                    logger.warning(f"Conflict: {rel_path} was modified locally. Skipping server deletion to prevent data loss.")
+                    continue
+                    
+                latest = db.get_latest_revision(file_record) if file_record else None
+                if latest and local_hash != latest.full_hash:
+                    logger.warning(f"Conflict: {rel_path} has unindexed local changes. Skipping server deletion.")
                     continue
 
                 logger.info(f"Removing file deleted on server: {rel_path}")
@@ -390,6 +393,7 @@ def download_missing_from_server(config):
             needs_download = False
 
             latest = db.get_latest_revision(file_record) if file_record else None
+            local_hash = get_hash(abs_path) if os.path.isfile(abs_path) else None
 
             if not os.path.exists(abs_path):
                 # If missing locally but active on server, we need to download it.
@@ -399,12 +403,17 @@ def download_missing_from_server(config):
                         continue
                 needs_download = True
             else:
-                local_hash = get_hash(abs_path)
                 if local_hash != server_hash:
                     # Conflict detection: skip download if local file has un-synced changes
                     if latest and local_hash != latest.full_hash:
                         logger.warning(f"Conflict: {rel_path} was modified locally. Skipping download to prevent data loss.")
                         continue
+                        
+                    if file_record:
+                        known_hashes = {r.full_hash for r in db.get_all_revisions(file_record)}
+                        if server_hash in known_hashes and local_hash != server_hash:
+                            logger.info(f"Local version of {rel_path} is newer than server. Skipping download.")
+                            continue
                     needs_download = True
                 elif file_record and file_record.is_deleted:
                     # File matches server but is incorrectly flagged as deleted locally
@@ -415,6 +424,20 @@ def download_missing_from_server(config):
                 temp_path = abs_path + ".psync_tmp"
                 if download_file_from_server(server_hash, temp_path, config):
                     try:
+                        downloaded_hash = get_hash(temp_path)
+                        if downloaded_hash != server_hash:
+                            logger.error(f"Hash mismatch on downloaded file {rel_path}. Aborting replace.")
+                            if os.path.exists(temp_path):
+                                os.remove(temp_path)
+                            continue
+                            
+                        current_local_hash = get_hash(abs_path) if os.path.isfile(abs_path) else None
+                        if current_local_hash != local_hash:
+                            logger.warning(f"Conflict: {rel_path} modified locally during download. Aborting overwrite to prevent data loss.")
+                            if os.path.exists(temp_path):
+                                os.remove(temp_path)
+                            continue
+
                         os.replace(temp_path, abs_path)
                         process_file_change(abs_path, "Downloaded", config, skip_upload=True)
                         downloaded_count += 1
@@ -460,30 +483,97 @@ def sync_from_remote_log(config):
         rel_path = change['f']
         abs_path = os.path.join(config.base_path, rel_path)
         
+        file_record = db.get_file(rel_path)
+        latest = db.get_latest_revision(file_record) if file_record else None
+        
         if op == 'updated':
             server_hash = change['h']
-            local_hash = get_hash(abs_path) if os.path.exists(abs_path) else None
+            local_hash = get_hash(abs_path) if os.path.isfile(abs_path) else None
             if local_hash != server_hash:
+                if local_hash:
+                    if latest and local_hash != latest.full_hash:
+                        logger.warning(f"Conflict: {rel_path} modified locally. Skipping remote update.")
+                        continue
+                    if file_record:
+                        known_hashes = {r.full_hash for r in db.get_all_revisions(file_record)}
+                        if server_hash in known_hashes and local_hash != server_hash:
+                            logger.info(f"Local {rel_path} is ahead of server. Skipping remote update.")
+                            continue
+                            
                 temp_path = abs_path + ".psync_tmp"
                 if download_file_from_server(server_hash, temp_path, config):
-                    os.replace(temp_path, abs_path)
-                    process_file_change(abs_path, "Downloaded", config, skip_upload=True)
+                    try:
+                        downloaded_hash = get_hash(temp_path)
+                        if downloaded_hash != server_hash:
+                            logger.error(f"Hash mismatch on downloaded file {rel_path}. Aborting replace.")
+                            if os.path.exists(temp_path): os.remove(temp_path)
+                            continue
+
+                        current_local_hash = get_hash(abs_path) if os.path.isfile(abs_path) else None
+                        if current_local_hash != local_hash:
+                            logger.warning(f"Conflict: {rel_path} modified locally during download. Aborting overwrite.")
+                            if os.path.exists(temp_path): os.remove(temp_path)
+                            continue
+
+                        os.replace(temp_path, abs_path)
+                        process_file_change(abs_path, "Downloaded", config, skip_upload=True)
+                    except Exception as e:
+                        logger.error(f"Failed to finalize download for {rel_path}: {e}")
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
                     
         elif op == 'deleted':
-            if os.path.exists(abs_path):
-                os.remove(abs_path)
-                remove_empty_dirs(abs_path, config.base_path)
-                handle_deletion(abs_path, config, notify_server=False)
+            if os.path.isfile(abs_path):
+                local_hash = get_hash(abs_path)
+                server_deleted_hash = change.get('h')
+                
+                if server_deleted_hash and local_hash != server_deleted_hash:
+                    logger.warning(f"Conflict: {rel_path} modified locally. Skipping remote deletion.")
+                    continue
+                    
+                if latest and local_hash != latest.full_hash:
+                    logger.warning(f"Conflict: {rel_path} modified locally. Skipping remote deletion.")
+                    continue
+                    
+                try:
+                    os.remove(abs_path)
+                    remove_empty_dirs(abs_path, config.base_path)
+                    handle_deletion(abs_path, config, notify_server=False)
+                except Exception as e:
+                    logger.error(f"Failed to delete {rel_path}: {e}")
                 
         elif op == 'moved':
             new_rel_path = change['nf']
             new_abs_path = os.path.join(config.base_path, new_rel_path)
-            if os.path.exists(abs_path):
-                os.makedirs(os.path.dirname(new_abs_path), exist_ok=True)
-                os.rename(abs_path, new_abs_path)
-                remove_empty_dirs(abs_path, config.base_path)
-                # Update local DB state
-                handle_move(abs_path, new_abs_path, config, notify_server=False)
+            
+            if os.path.isfile(new_abs_path):
+                target_hash = get_hash(new_abs_path)
+                target_record = db.get_file(new_rel_path)
+                t_latest = db.get_latest_revision(target_record) if target_record else None
+                if not t_latest or target_hash != t_latest.full_hash:
+                    logger.warning(f"Conflict: Target {new_rel_path} modified locally. Skipping move.")
+                    continue
+                    
+            if os.path.isfile(abs_path):
+                local_hash = get_hash(abs_path)
+                server_source_hash = change.get('h')
+                
+                if server_source_hash and local_hash != server_source_hash:
+                    logger.warning(f"Conflict: Source {rel_path} modified locally. Skipping move.")
+                    continue
+                    
+                if latest and local_hash != latest.full_hash:
+                    logger.warning(f"Conflict: Source {rel_path} modified locally. Skipping move.")
+                    continue
+
+                try:
+                    os.makedirs(os.path.dirname(new_abs_path), exist_ok=True)
+                    os.rename(abs_path, new_abs_path)
+                    remove_empty_dirs(abs_path, config.base_path)
+                    # Update local DB state
+                    handle_move(abs_path, new_abs_path, config, notify_server=False)
+                except Exception as e:
+                    logger.error(f"Failed to move {rel_path} to {new_rel_path}: {e}")
 
         new_last_id = max(new_last_id, change['id'])
 
