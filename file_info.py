@@ -60,9 +60,10 @@ def is_ignored(path: str, config, rel_path: str = None): # pyright: ignore[repor
             return True
     return False
 
-def upload_to_server(path: str, rel_path: str, file_hash: str, last_modified: datetime, config):
+def upload_to_server(path: str, rel_path: str, file_hash: str, last_modified: datetime, config) -> bool:
     """
     Sends a POST request to the server's /up endpoint to upload a file.
+    Returns True if successful, False otherwise.
     """
     client = ServerClient(config)
     try:
@@ -72,8 +73,10 @@ def upload_to_server(path: str, rel_path: str, file_hash: str, last_modified: da
         client.upload_file(path, rel_path, file_hash, last_modified.timestamp())
         duration = (datetime.now() - start_time).total_seconds()
         logger.info(f"Successfully uploaded {rel_path} in {duration:.2f}s")
+        return True
     except Exception as e:
-        logger.error(f"Upload failed for {rel_path}: {e}", exc_info=True)
+        logger.error(f"Upload failed for {rel_path}: {e}")
+        return False
 
 def process_file_change(path: str, event_type: str, config, source_path: str = "", skip_upload: bool = False):
     """
@@ -101,6 +104,12 @@ def process_file_change(path: str, event_type: str, config, source_path: str = "
 
     recreated = file_obj.is_deleted
     if created or recreated or latest is None or latest.full_hash != fi.hash:
+        # Upload the file to the server FIRST to prevent false-sync states
+        if not skip_upload:
+            if not upload_to_server(path, rel_path, str(fi.hash), fi.last_modified, config):
+                logger.warning(f"Upload failed for {rel_path}. Skipping local DB update to retry later.")
+                return
+
         db.update_file_status(file_obj, is_deleted=False)
         db.create_file_revision(
             file_obj,
@@ -108,10 +117,6 @@ def process_file_change(path: str, event_type: str, config, source_path: str = "
             fi.size,
             fi.last_modified
         )
-        
-        # Upload the file to the server
-        if not skip_upload:
-            upload_to_server(path, rel_path, str(fi.hash), fi.last_modified, config)
         
         log_msg = f"{event_type}: {rel_path}"
         if source_path:
@@ -159,11 +164,22 @@ def handle_move(src_path: str, dest_path: str, config, notify_server: bool = Tru
     if rel_src == rel_dst:
         return
 
+    if notify_server:
+        # Notify server of the move first
+        client = ServerClient(config)
+        try:
+            client.move_file(str(rel_src), str(rel_dst))
+        except Exception as e:
+            logger.error(f"Failed to notify server of move from {rel_src}: {e}")
+            # Fallback to standard change processing on next pass or right now
+            process_file_change(dest_path, "Moved", config, source_path=src_path)
+            return
+
     # Try to perform an optimized move in the local DB
     success = False
     with db.atomic():
         # Find all files that are either the file itself or children of the moved directory
-        targets = db.get_active_files_by_prefix(str(rel_src))
+        targets = list(db.get_active_files_by_prefix(str(rel_src)))
 
         for old_file in targets:
             latest = db.get_latest_revision(old_file)
@@ -190,25 +206,20 @@ def handle_move(src_path: str, dest_path: str, config, notify_server: bool = Tru
     if not success and os.path.isdir(dest_path):
         return # Nothing in DB to move for this directory
 
-    if success and notify_server:
-        # Notify server of the move
-        client = ServerClient(config)
-        try:
-            client.move_file(str(rel_src), str(rel_dst))
-            return
-        except Exception as e:
-            logger.error(f"Failed to notify server of move from {rel_src}: {e}")
-    
-    # Fallback to standard change processing (hash + upload) if optimized move fails
-    process_file_change(dest_path, "Moved", config, source_path=src_path)
+    if not success and not notify_server:
+        process_file_change(dest_path, "Moved", config, source_path=src_path, skip_upload=True)
+    elif not success and notify_server:
+        process_file_change(dest_path, "Moved", config, source_path=src_path)
 
-def delete_from_server(rel_path: str, config):
-    """Sends a DELETE request to the server to mark a file as deleted."""
+def delete_from_server(rel_path: str, config) -> bool:
+    """Sends a DELETE request to the server. Returns True on success."""
     client = ServerClient(config)
     try:
         client.delete_file(rel_path)
+        return True
     except Exception as e:
         logger.error(f"Failed to notify server of deletion for {rel_path}: {e}")
+        return False
 
 def handle_deletion(path: str, config, notify_server: bool = True):
     """Marks a file as deleted locally and notifies the server."""
@@ -224,12 +235,16 @@ def handle_deletion(path: str, config, notify_server: bool = True):
     targets = list(db.get_active_files_by_prefix(rel_path))
     for file_record in targets:
         f_rel_path = file_record.relative_path
+        
+        if notify_server:
+            if not delete_from_server(f_rel_path, config):
+                logger.warning(f"Skipping local deletion record for {f_rel_path} due to server error.")
+                continue
+
         affected = db.mark_active_file_deleted(f_rel_path)
         
         if affected > 0:
             logger.info(f"Deleted: {f_rel_path}")
-            if notify_server:
-                delete_from_server(f_rel_path, config)
 
 def remove_empty_dirs(path: str, base_path: str):
     """Recursively removes empty directories from the given path up to the base_path."""
@@ -281,21 +296,21 @@ def scan_files(config):
     logger.info(f"Scanning {config.base_path} for changes...")
     found_rel_paths = set()
 
-    with db.atomic():
-        # Scan disk for new and modified files
-        for ff in Path(config.base_path).rglob('*'):
-            rel_path = str(ff.relative_to(config.base_path))
-            if ff.is_file() and not is_ignored(str(ff), config, rel_path=rel_path):
-                process_file_change(str(ff), "Indexed", config)
-                found_rel_paths.add(rel_path)
+    # Removed db.atomic() to prevent blocking the DB during network uploads
+    # Scan disk for new and modified files
+    for ff in Path(config.base_path).rglob('*'):
+        rel_path = str(ff.relative_to(config.base_path))
+        if ff.is_file() and not is_ignored(str(ff), config, rel_path=rel_path):
+            process_file_change(str(ff), "Indexed", config)
+            found_rel_paths.add(rel_path)
 
-        # Check database for files that no longer exist on disk
-        active_db_files = db.get_active_files()
-        for file_record in active_db_files:
-            if file_record.relative_path not in found_rel_paths:
+    # Check database for files that no longer exist on disk
+    active_db_files = list(db.get_active_files())
+    for file_record in active_db_files:
+        if file_record.relative_path not in found_rel_paths:
+            if delete_from_server(file_record.relative_path, config):
                 db.update_file_status(file_record, is_deleted=True)
                 logger.info(f"Detected deletion during scan: {file_record.relative_path}")
-                delete_from_server(file_record.relative_path, config)
 
 def upload_missing_to_server(config):
     """
@@ -325,10 +340,10 @@ def upload_missing_to_server(config):
         rel_path = file_record.relative_path
         if rel_path not in server_inventory or server_inventory[rel_path] != latest.full_hash:
             abs_path = os.path.join(config.base_path, rel_path)
-            if os.path.exists(abs_path):
+            if os.path.isfile(abs_path):
                 logger.info(f"Uploading missing/mismatched file: {rel_path}")
-                upload_to_server(abs_path, rel_path, latest.full_hash, latest.last_modified, config)
-                uploaded_count += 1
+                if upload_to_server(abs_path, rel_path, latest.full_hash, latest.last_modified, config):
+                    uploaded_count += 1
 
     if uploaded_count == 0:
         logger.info("Server is already up to date with local files.")
